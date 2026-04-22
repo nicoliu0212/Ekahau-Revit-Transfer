@@ -5,6 +5,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.4.1] — 2026-04-22
+
+### Added
+- **DWG Export ribbon icon** — 32 px and 16 px PNGs added to `Resources/`. Visually distinct red right-arrow + "DWG" label vs ESX Export's blue arrow, so the two export commands are easy to tell apart at a glance.
+
 ## [2.4.0] — 2026-04-22
 
 ### Added
