@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/nicoliu0212/Ekahau-Revit-Transfer?include_prereleases&sort=semver)](https://github.com/nicoliu0212/Ekahau-Revit-Transfer/releases)
 
-[Quick Start](#-quick-start) · [Features](#-features) · [Installation](#-installation) · [使用说明 (中文)](使用说明.md) · [Build from Source](#-build-from-source) · [Changelog](CHANGELOG.md)
+[Quick Start](#-quick-start) · [Features](#-features) · [Installation](#-installation) · [User Guide](USER_GUIDE.md) · [Build from Source](#-build-from-source) · [Changelog](CHANGELOG.md)
 
 </div>
 
@@ -42,7 +42,7 @@ Revit  ◄──[ESX Read]──── reads .esx + finds matching .ekahau-cal.j
 ## ✨ Features
 
 ### Export
-- **ESX Export** — Floor plan views → Ekahau `.esx` with wall/door/window geometry, RF material presets, embedded PNG. Supports linked models and curtain walls. Resolution selectable from 2 000 to 15 000 px.
+- **ESX Export** — Floor plan views → Ekahau `.esx` with wall/door/window geometry, RF material presets, embedded PNG. Supports linked models and curtain walls. Resolution selectable from 2 000 to 15 000 px at 300 DPI.
 - **DWG Export** — One-click "Clean" DWG export tuned for Ekahau (mm units, AutoCAD R2018, AIA layers) + sidecar `.ekahau-cal.json` calibration file for round-trip.
 
 ### Import
@@ -59,14 +59,18 @@ Revit  ◄──[ESX Read]──── reads .esx + finds matching .ekahau-cal.j
 - **Revit 2023-2027** supported via three build flavours (`net48`, `net8.0-windows`, `net10.0-windows`).
 - Cross-version API differences are abstracted in a single `VersionCompat` class — no `#if` directives in business logic.
 
+### Per-user install
+- Installs to `%APPDATA%\Autodesk\Revit\Addins\YYYY\` — **no admin / UAC required**.
+- Files are visible only to the installing user; nothing written to `Program Files` or `ProgramData`.
+
 ---
 
 ## 🚀 Quick Start
 
 1. **Download** the latest [`EkahauWiFiTools-vX.Y.Z.msi`](https://github.com/nicoliu0212/Ekahau-Revit-Transfer/releases/latest)
-2. Double-click → UAC prompt → install (covers Revit 2025 / 2026 / 2027 in one shot)
-3. Open Revit → top of the ribbon there's a new **WiFi Tools** tab with five buttons
-4. (Revit 2023 / 2024 only) Run `install.ps1 -Scope AllUsers` from an elevated PowerShell
+2. Double-click → install proceeds without UAC prompt
+3. Open Revit → top of the ribbon there's a new **WiFi Tools** tab
+4. (Revit 2023 / 2024 only) Run `install.ps1` from PowerShell — also no admin required
 
 ```
 WiFi Tools
@@ -88,28 +92,34 @@ WiFi Tools
 
 **Why two paths?** The net48 build pulls in 9 supporting BCL DLLs (`System.Text.Json` and friends) which would bloat the MSI ~3×. The MSI keeps Revit 2025-2027 lean; the PowerShell script handles the 2023 / 2024 path on demand.
 
+### Install location
+
+All install paths are **per-user under AppData**:
+
+```
+%APPDATA%\Autodesk\Revit\Addins\YYYY\
+    EkahauRevitPlugin.addin
+    EkahauWiFiTools\
+        EkahauRevitPlugin.dll
+        EkahauRevitPlugin.deps.json
+        (… supporting DLLs for net48 only)
+```
+
+The MSI does **not** request elevation, does **not** write to `Program Files` or `ProgramData`, and does **not** modify HKLM — everything is HKCU + per-user file system.
+
 ### Manual install (PowerShell)
 
 ```powershell
-# Default — current user, no admin required
 .\install.ps1
-
-# All users (admin required)
-.\install.ps1 -Scope AllUsers
 ```
 
-Detects which Revit versions are installed and copies the matching DLL into the right folder:
-
-| Revit | All-users path |
-|---|---|
-| 2023-2026 | `C:\ProgramData\Autodesk\Revit\Addins\YYYY\` |
-| 2027 | `C:\Program Files\Autodesk\Revit\Addins\2027\` |
+Detects which Revit versions are installed and copies the matching DLL into `%APPDATA%\Autodesk\Revit\Addins\YYYY\` for each one.
 
 ---
 
 ## 📖 Documentation
 
-- **[使用说明 (中文)](使用说明.md)** — Comprehensive Chinese user manual covering every feature, common issues, and recommended workflow.
+- **[USER_GUIDE.md](USER_GUIDE.md)** — Comprehensive user manual covering every feature, common issues, and recommended workflow.
 - **[CHANGELOG.md](CHANGELOG.md)** — Version history.
 
 ---
@@ -173,7 +183,7 @@ EkahauRevitPlugin/
 ├── LinkedModelSelectorDialog.cs Linked model picker
 └── Resources/                   Ribbon icons (32x32 + 16x16 PNG)
 Installer/
-└── Package.wxs                  WiX MSI definition
+└── Package.wxs                  WiX MSI definition (per-user, AppData scope)
 ```
 
 ### Key design decisions
@@ -185,7 +195,7 @@ Installer/
 | Project-isolated staging directory (MD5 of doc path) | Safe to run multiple Revit projects in parallel |
 | `BoxPlacement.Center` for image overlay | Simpler than BottomLeft + manual offset math; correct on rotated views |
 | Three-tier calibration (revitAnchor → .cal.json → manual two-point) | Graceful degradation; works with .esx files exported by anyone |
-| Polymorphic `object` JSON converter | Defensive against System.Text.Json's silent dropping of nested `Dictionary<string, object>` values |
+| Per-user AppData install | No admin / UAC; HKCU only; doesn't write to Program Files or ProgramData |
 
 ---
 

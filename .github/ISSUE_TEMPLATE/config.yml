@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
-  - name: 中文用户手册 (Chinese user manual)
-    url: https://github.com/nicoliu0212/Ekahau-Revit-Transfer/blob/main/%E4%BD%BF%E7%94%A8%E8%AF%B4%E6%98%8E.md
-    about: Comprehensive Chinese documentation covering every feature.
+  - name: User Guide
+    url: https://github.com/nicoliu0212/Ekahau-Revit-Transfer/blob/main/USER_GUIDE.md
+    about: Comprehensive documentation covering every feature, workflows, and FAQ.
   - name: Discussions
     url: https://github.com/nicoliu0212/Ekahau-Revit-Transfer/discussions
     about: General questions, ideas, and show-and-tell go in Discussions.

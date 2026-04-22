@@ -1,36 +1,25 @@
 @echo off
 REM ─────────────────────────────────────────────────────────────────
-REM  Manual install for Revit 2027 — UNSIGNED third-party add-in
-REM  Right-click → "Run as administrator"
+REM  Manual install for Revit 2027 — per-user (no admin required)
+REM  Just double-click this file.  No UAC prompt.
 REM
-REM  Revit 2027 add-in path rules:
+REM  Installs to:
+REM    %APPDATA%\Autodesk\Revit\Addins\2027\
 REM
-REM    OK   C:\Program Files\Autodesk\Revit\Addins\2027\
-REM         (third-party add-ins, signed or unsigned, all-users)
-REM
-REM    OK   %APPDATA%\Autodesk\Revit\Addins\2027\
-REM         (third-party add-ins, current-user)
-REM
-REM    NO   C:\Program Files\Autodesk\Revit 2027\AddIns\
-REM         (RESERVED for code-signed Autodesk-internal add-ins.
-REM          Unsigned manifests there are rejected with:
-REM          "is not signed as internal addin")
-REM
-REM    NO   C:\ProgramData\Autodesk\Revit\Addins\2027\
-REM         (Pre-2027 path; explicitly rejected by Revit 2027:
-REM          "All-users Add-in manifest files must be installed to:
-REM           C:\Program Files\Autodesk\Revit\Addins\2027")
+REM  Removes any prior installs from system locations (safe to re-run).
 REM ─────────────────────────────────────────────────────────────────
 
 setlocal
 set SRC=%~dp0EkahauRevitPlugin\bin\Release\net10.0-windows
-set DST=C:\Program Files\Autodesk\Revit\Addins\2027
+set DST=%APPDATA%\Autodesk\Revit\Addins\2027
 
 echo.
-echo === Cleaning up wrong / stale install locations ===
+echo === Removing any prior installs from other locations ===
 for %%P in (
     "C:\ProgramData\Autodesk\Revit\Addins\2027\EkahauRevitPlugin.addin"
     "C:\ProgramData\Autodesk\Revit\Addins\2027\EkahauWiFiTools"
+    "C:\Program Files\Autodesk\Revit\Addins\2027\EkahauRevitPlugin.addin"
+    "C:\Program Files\Autodesk\Revit\Addins\2027\EkahauWiFiTools"
     "C:\Program Files\Autodesk\Revit 2027\AddIns\EkahauWiFiTools"
 ) do (
     if exist %%P (
@@ -41,7 +30,7 @@ for %%P in (
 )
 
 echo.
-echo === Installing to correct path: %DST% ===
+echo === Installing to %DST% ===
 if not exist "%DST%" mkdir "%DST%"
 if not exist "%DST%\EkahauWiFiTools" mkdir "%DST%\EkahauWiFiTools"
 

@@ -5,6 +5,7 @@ First public release. Bridges Autodesk Revit and Ekahau AI Pro for WiFi-planning
 ## ✨ What's in this release
 
 ### Five ribbon commands
+
 | Command | What it does |
 |---|---|
 | **Param Config** | Creates the `Ekahau_WallType` shared parameter and walks the active view, suggesting RF material presets via keyword + material-layer matching (with linked-model support via ExtensibleStorage). |
@@ -23,16 +24,20 @@ First public release. Bridges Autodesk Revit and Ekahau AI Pro for WiFi-planning
 
 Cross-version Revit API differences are abstracted in a single `VersionCompat` class (no `#if` directives in business logic).
 
+### Per-user install
+
+The MSI installs **per-user** to `%APPDATA%\Autodesk\Revit\Addins\YYYY\` — **no admin / UAC required**, no writes to `Program Files` or `ProgramData`, all registry entries under HKCU.
+
 ## 📦 Installation
 
-**Recommended (Revit 2025 / 2026 / 2027)** — download `EkahauWiFiTools-v2.4.0.msi` below, double-click, accept UAC.
+**Recommended (Revit 2025 / 2026 / 2027)** — download `EkahauWiFiTools-v2.4.0.msi` below, double-click, install.
 
-**Revit 2023 / 2024** — clone the repo, then from an elevated PowerShell:
+**Revit 2023 / 2024** — clone the repo and run:
 ```powershell
-.\install.ps1 -Scope AllUsers
+.\install.ps1
 ```
 
-See the [README](https://github.com/nicoliu0212/Ekahau-Revit-Transfer#-installation) for detailed installation paths and the [使用说明](https://github.com/nicoliu0212/Ekahau-Revit-Transfer/blob/main/%E4%BD%BF%E7%94%A8%E8%AF%B4%E6%98%8E.md) for full Chinese documentation.
+See the [README](https://github.com/nicoliu0212/Ekahau-Revit-Transfer#-installation) for detailed installation paths and the [User Guide](https://github.com/nicoliu0212/Ekahau-Revit-Transfer/blob/main/USER_GUIDE.md) for full documentation.
 
 ## 🚀 Quick workflow
 

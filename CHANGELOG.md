@@ -11,6 +11,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 - **ESX Read — Two-point manual calibration** (Tier 3a fallback). When a `.esx` has no `revitAnchor` and no `.ekahau-cal.json` is found, the user can now click two reference points in the Revit view and type the corresponding Ekahau coordinates (in metres or pixels). The plugin computes a scale + translation transform, sanity-checks it against the `.esx`'s declared `metersPerUnit`, and synthesises an `EsxRevitAnchorData` so the rest of the import pipeline works unchanged.
 - New `TwoPointPixelDialog` WPF dialog with metres/pixels input mode toggle.
 
+### Changed
+- **MSI installer is now per-user** (`Scope="perUser"`), installs to `%APPDATA%\Autodesk\Revit\Addins\YYYY\`. No admin / UAC required, no writes to `Program Files` or `ProgramData`, all registry entries under HKCU. Same path for Revit 2025 / 2026 / 2027 — Revit's per-user path was unaffected by the 2027 all-users path change.
+- `install.ps1` simplified — no longer takes a `-Scope` parameter; always installs per-user to AppData.
+- `fix-revit-2027.bat` now installs to AppData (no admin needed); still cleans up any prior installs from the system locations.
+
 ## [2.3.5] — 2026-04-21
 
 ### Changed
