@@ -1,0 +1,64 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net48;net8.0-windows;net10.0-windows</TargetFrameworks>
+    <LangVersion>10.0</LangVersion>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>EkahauRevitPlugin</RootNamespace>
+    <AssemblyName>EkahauRevitPlugin</AssemblyName>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <AppendTargetFrameworkToOutputPath>true</AppendTargetFrameworkToOutputPath>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <AssetTargetFallback>net8.0</AssetTargetFallback>
+  </PropertyGroup>
+
+  <!-- Conditional compilation constants -->
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net48'">
+    <DefineConstants>$(DefineConstants);REVIT_LEGACY</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
+    <DefineConstants>$(DefineConstants);REVIT_NET8</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">
+    <DefineConstants>$(DefineConstants);REVIT_NET10</DefineConstants>
+  </PropertyGroup>
+
+  <!-- Revit 2024 SDK for the net48 build (works on Revit 2023 + 2024) -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+    <PackageReference Include="Autodesk.Revit.SDK" Version="2024.0.0"
+                      IncludeAssets="compile" PrivateAssets="all" />
+    <!-- System.Text.Json isn't part of .NET Framework — pull it in. -->
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+    <!-- ZipArchive lives in System.IO.Compression on .NET Framework. -->
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
+  </ItemGroup>
+
+  <!-- Revit 2025 SDK for the net8 build (works on Revit 2025 + 2026) -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
+    <PackageReference Include="Autodesk.Revit.SDK" Version="2025.0.0"
+                      IncludeAssets="compile" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- Revit 2027 build (.NET 10 runtime).
+       The Autodesk.Revit.SDK 2027.0.0 NuGet hasn't shipped yet, so we
+       compile against the 2026 SDK as a placeholder.  The API surface
+       between 2026 and 2027 is essentially unchanged — the breaking
+       change is the runtime (.NET 8 → .NET 10), not the Revit API.
+       Bump to "2027.0.0" the moment Autodesk publishes that package. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">
+    <PackageReference Include="Autodesk.Revit.SDK" Version="2026.0.0.9999"
+                      IncludeAssets="compile" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="EkahauRevitPlugin.addin" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Ribbon button icons — drop 32x32 + 16x16 PNGs into Resources\ -->
+    <EmbeddedResource Include="Resources\*.png" />
+  </ItemGroup>
+
+</Project>

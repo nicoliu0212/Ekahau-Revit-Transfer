@@ -1,0 +1,61 @@
+# ─── .NET / Visual Studio ─────────────────────────────────────
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+*.cache
+*.tmp
+*.tmp_proj
+
+# Build output
+**/Debug/
+**/Release/
+
+# WiX intermediates
+*.wixobj
+*.wixpdb
+
+# NuGet
+*.nuget.props
+*.nuget.targets
+project.lock.json
+project.assets.json
+**/.config/dotnet-tools.json
+
+# JetBrains Rider
+.idea/
+
+# VSCode
+.vscode/
+
+# OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+
+# ─── Project-specific ─────────────────────────────────────────
+# Built MSI installers — release artefacts only, not source-tracked
+Installer/*.msi
+Installer/*.wixpdb
+
+# WiX local extension cache (auto-restored from NuGet by WiX)
+**/.wix/
+
+# Old MSI/Output artefacts from earlier development
+Output/
+
+# Local install logs from PowerShell installer
+install.log
+
+# User-local Ekahau staging directories (project-isolated tempfiles)
+EkahauRevitPlugin/Resources/*.zip
+
+# Don't commit any actual .esx test files
+*.esx
+samples/*.esx

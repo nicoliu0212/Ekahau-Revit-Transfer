@@ -1,0 +1,101 @@
+name: Build & Release
+
+# Triggers:
+#   - push to main     → build-only sanity check (all 3 targets must compile)
+#   - push of v* tag   → build + create GitHub Release + attach MSI
+#   - manual dispatch  → same as tag but no release (for debugging)
+
+on:
+  push:
+    branches: [ main ]
+    tags:     [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to create releases
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # full history so CHANGELOG works
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Setup .NET 10 SDK (preview)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+          dotnet-quality: preview
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build all three targets (Release)
+        run: dotnet build -c Release --no-restore
+
+      - name: Install WiX v6
+        run: dotnet tool install --global wix --version 6.0.0
+
+      - name: Extract version from tag (or default)
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ($tag -match '^v(\d+\.\d+\.\d+)$') {
+            $version = $Matches[1]
+          } else {
+            $version = "0.0.0-dev"
+          }
+          Write-Host "version=$version"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
+
+      - name: Build MSI
+        shell: pwsh
+        run: |
+          cd Installer
+          wix build Package.wxs -o "EkahauWiFiTools-v${{ steps.version.outputs.version }}.msi"
+
+      - name: Upload build artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: EkahauWiFiTools-v${{ steps.version.outputs.version }}
+          path: |
+            Installer/EkahauWiFiTools-*.msi
+            EkahauRevitPlugin/bin/Release/net48/EkahauRevitPlugin.dll
+            EkahauRevitPlugin/bin/Release/net8.0-windows/EkahauRevitPlugin.dll
+            EkahauRevitPlugin/bin/Release/net10.0-windows/EkahauRevitPlugin.dll
+          retention-days: 30
+
+      # ─── Release step — only runs on v* tag pushes ──────────────
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## Ekahau ↔ Revit Transfer v${{ steps.version.outputs.version }}
+
+            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
+
+            ### Installation
+
+            | Revit version | Download |
+            |---|---|
+            | 2025 / 2026 / 2027 | `EkahauWiFiTools-v${{ steps.version.outputs.version }}.msi` (double-click, UAC prompt → install) |
+            | 2023 / 2024       | Clone the repo and run `.\install.ps1 -Scope AllUsers` from elevated PowerShell |
+
+            See the [README](https://github.com/${{ github.repository }}#-installation) for details.
+          files: |
+            Installer/EkahauWiFiTools-*.msi

@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <Package Name="Ekahau WiFi Tools for Revit 2025-2027"
+           Manufacturer="Ekahau Transfer"
+           Version="2.4.0.0"
+           UpgradeCode="F7A3B2C1-D4E5-6789-ABCD-0123456789AB"
+           Scope="perMachine">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <WixVariable Id="WixUILicenseUrl" Value="" />
+
+    <!-- ============================================================ -->
+    <!--  Directory layout                                              -->
+    <!--                                                                -->
+    <!--  Revit 2025 / 2026  →  C:\ProgramData\Autodesk\Revit\Addins\  -->
+    <!--                          {YYYY}\EkahauRevitPlugin.addin        -->
+    <!--                          {YYYY}\EkahauWiFiTools\*.dll          -->
+    <!--                                                                -->
+    <!--  Revit 2027 (UNSIGNED third-party add-ins) →                  -->
+    <!--                       C:\Program Files\Autodesk\Revit\Addins\ -->
+    <!--                          2027\EkahauRevitPlugin.addin          -->
+    <!--                          2027\EkahauWiFiTools\*.dll            -->
+    <!--                                                                -->
+    <!--  IMPORTANT — DO NOT install third-party add-ins to             -->
+    <!--    C:\Program Files\Autodesk\Revit 2027\AddIns\                -->
+    <!--  That path is reserved for code-signed Autodesk-internal       -->
+    <!--  add-ins.  An unsigned manifest there is rejected with:        -->
+    <!--    "is not signed as internal addin"                           -->
+    <!-- ============================================================ -->
+
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="DIR_PD_Autodesk" Name="Autodesk">
+        <Directory Id="DIR_PD_Revit" Name="Revit">
+          <Directory Id="DIR_PD_Addins" Name="Addins">
+
+            <Directory Id="DIR_2025" Name="2025">
+              <Directory Id="DIR_2025_Plugin" Name="EkahauWiFiTools" />
+            </Directory>
+            <Directory Id="DIR_2026" Name="2026">
+              <Directory Id="DIR_2026_Plugin" Name="EkahauWiFiTools" />
+            </Directory>
+
+          </Directory>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- Revit 2027 — Program Files\Autodesk\Revit\Addins\2027\        -->
+    <!--   (NOT  Program Files\Autodesk\Revit 2027\AddIns\)            -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="DIR_PF_Autodesk" Name="Autodesk">
+        <Directory Id="DIR_PF_Revit" Name="Revit">
+          <Directory Id="DIR_PF_Addins" Name="Addins">
+            <Directory Id="DIR_2027" Name="2027">
+              <Directory Id="DIR_2027_Plugin" Name="EkahauWiFiTools" />
+            </Directory>
+          </Directory>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- ============================================================ -->
+    <!--  Revit 2025 — net8 build                                      -->
+    <!-- ============================================================ -->
+    <ComponentGroup Id="Cg_2025_Manifest" Directory="DIR_2025">
+      <Component Id="Cmp_2025_Addin" Guid="A1111111-B222-C333-D444-E55555555525">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net8.0-windows\EkahauRevitPlugin.addin"
+              Name="EkahauRevitPlugin.addin" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+    <ComponentGroup Id="Cg_2025_Plugin" Directory="DIR_2025_Plugin">
+      <Component Id="Cmp_2025_Dll" Guid="B2222222-C333-D444-E555-F66666666625">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net8.0-windows\EkahauRevitPlugin.dll"
+              Name="EkahauRevitPlugin.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Cmp_2025_Deps" Guid="C3333333-D444-E555-F666-A77777777725">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net8.0-windows\EkahauRevitPlugin.deps.json"
+              Name="EkahauRevitPlugin.deps.json" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- ============================================================ -->
+    <!--  Revit 2026 — net8 build (same DLL as 2025)                   -->
+    <!-- ============================================================ -->
+    <ComponentGroup Id="Cg_2026_Manifest" Directory="DIR_2026">
+      <Component Id="Cmp_2026_Addin" Guid="A1111111-B222-C333-D444-E55555555526">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net8.0-windows\EkahauRevitPlugin.addin"
+              Name="EkahauRevitPlugin.addin" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+    <ComponentGroup Id="Cg_2026_Plugin" Directory="DIR_2026_Plugin">
+      <Component Id="Cmp_2026_Dll" Guid="B2222222-C333-D444-E555-F66666666626">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net8.0-windows\EkahauRevitPlugin.dll"
+              Name="EkahauRevitPlugin.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Cmp_2026_Deps" Guid="C3333333-D444-E555-F666-A77777777726">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net8.0-windows\EkahauRevitPlugin.deps.json"
+              Name="EkahauRevitPlugin.deps.json" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- ============================================================ -->
+    <!--  Revit 2027 — net10 build, layered layout under Program Files -->
+    <!-- ============================================================ -->
+    <ComponentGroup Id="Cg_2027_Manifest" Directory="DIR_2027">
+      <Component Id="Cmp_2027_Addin" Guid="A1111111-B222-C333-D444-E55555555527">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net10.0-windows\EkahauRevitPlugin.addin"
+              Name="EkahauRevitPlugin.addin" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+    <ComponentGroup Id="Cg_2027_Plugin" Directory="DIR_2027_Plugin">
+      <Component Id="Cmp_2027_Dll" Guid="B2222222-C333-D444-E555-F66666666627">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net10.0-windows\EkahauRevitPlugin.dll"
+              Name="EkahauRevitPlugin.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Cmp_2027_Deps" Guid="C3333333-D444-E555-F666-A77777777727">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net10.0-windows\EkahauRevitPlugin.deps.json"
+              Name="EkahauRevitPlugin.deps.json" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- ============================================================ -->
+    <Feature Id="MainFeature" Title="Ekahau WiFi Tools" Level="1">
+      <ComponentGroupRef Id="Cg_2025_Manifest" />
+      <ComponentGroupRef Id="Cg_2025_Plugin" />
+      <ComponentGroupRef Id="Cg_2026_Manifest" />
+      <ComponentGroupRef Id="Cg_2026_Plugin" />
+      <ComponentGroupRef Id="Cg_2027_Manifest" />
+      <ComponentGroupRef Id="Cg_2027_Plugin" />
+    </Feature>
+
+  </Package>
+</Wix>
