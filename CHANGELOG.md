@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.4] — 2026-05-01
+
+### Removed
+- **Manual coordinate-input dialog** (`TwoPointPixelDialog`) and the typed-coordinates calibration path entirely. Users have no reliable way to look up Ekahau pixel/metre values for arbitrary reference points; visual alignment (clicking on the placed image) replaces it cleanly. Bug Fix #16.
+- The "Type Ekahau coordinates" command link is gone from the manual-calibration intro dialog. Two options remain: **Start visual alignment** / **Skip**.
+- `BuildAnchorFromTwoPoints` helper deleted (only the visual-alignment path's rotation-aware anchor synthesis is kept).
+
+### Result
+- Zero coordinate typing anywhere in the workflow. All four calibration clicks happen directly in the Revit view (two on the Revit model, two on the placed Ekahau image).
+
 ## [2.5.3] — 2026-05-01
 
 ### Fixed

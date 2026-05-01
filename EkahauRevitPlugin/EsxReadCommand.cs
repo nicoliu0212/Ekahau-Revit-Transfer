@@ -2170,73 +2170,26 @@ namespace EkahauRevitPlugin
                         "  2. Hover over the reference point on the floor plan\n" +
                         "  3. Read the X / Y values (in metres) from the bottom status bar",
                 };
+                // Bug Fix #16: only one calibration option remains —
+                // visual alignment.  The "type Ekahau coordinates" path
+                // was removed because users have no reliable way to look
+                // up Ekahau pixel/metre values for arbitrary reference
+                // points.  All clicks now happen in the Revit view.
                 intro.AddCommandLink(TaskDialogCommandLinkId.CommandLink1,
-                    "Visual alignment (recommended)",
-                    "The Ekahau image is dropped into the view; you click each point " +
-                    "TWICE — once on the model, once on the same point on the image. " +
-                    "Handles rotation automatically.  No need to look up coordinates.");
+                    "Start visual alignment",
+                    "Drops the Ekahau floor plan image into the view; you click two " +
+                    "pairs of matching points (each point clicked once on the Revit " +
+                    "model, once on the same spot on the image).  Handles scale + " +
+                    "rotation + translation automatically.  No coordinate typing.");
                 intro.AddCommandLink(TaskDialogCommandLinkId.CommandLink2,
-                    "Type Ekahau coordinates",
-                    "Click two points in the view and type their X / Y in metres or " +
-                    "pixels (read from Ekahau Pro's status bar).  Scale + translation " +
-                    "only — no rotation.");
-                intro.AddCommandLink(TaskDialogCommandLinkId.CommandLink3,
                     "Skip — use approximate placement",
                     "AP markers will be placed using the current view's CropBox " +
                     "(may be off by several feet).");
                 intro.CommonButtons = TaskDialogCommonButtons.None;
                 intro.DefaultButton = TaskDialogResult.CommandLink1;
 
-                var introResp = intro.Show();
-                if (introResp == TaskDialogResult.CommandLink1)
-                    return OfferVisualAlignmentCore(uiDoc, view, fp, esxData);
-                if (introResp != TaskDialogResult.CommandLink2)
-                    return null;
-
-                // Make sure PickPoint targets the right view
-                try { uiDoc.ActiveView = view; uiDoc.RefreshActiveView(); DoEvents(); }
-                catch { }
-
-                // ── 2. Point A ──
-                TaskDialog.Show("Calibration — Point A",
-                    "Click a reference point in the Revit view.\n\n" +
-                    "Choose a point you can clearly identify in the Ekahau floor plan " +
-                    "(e.g. a building corner or column centre).");
-
-                XYZ ptA;
-                try { ptA = uiDoc.Selection.PickPoint("Pick Reference Point A in Revit view"); }
-                catch (Autodesk.Revit.Exceptions.OperationCanceledException) { return null; }
-                catch { return null; }
-
-                var dlgA = new TwoPointPixelDialog(
-                    "Point A",
-                    "Enter the Ekahau coordinates for Point A.",
-                    fp.MetersPerUnit);
-                if (dlgA.ShowDialog() != true) return null;
-                double pxA_x = dlgA.PixelX, pxA_y = dlgA.PixelY;
-
-                // ── 3. Point B ──
-                TaskDialog.Show("Calibration — Point B",
-                    "Click a SECOND reference point in the Revit view.\n\n" +
-                    "Choose a point FAR from Point A — diagonal corners are best.");
-
-                XYZ ptB;
-                try { ptB = uiDoc.Selection.PickPoint("Pick Reference Point B in Revit view"); }
-                catch (Autodesk.Revit.Exceptions.OperationCanceledException) { return null; }
-                catch { return null; }
-
-                var dlgB = new TwoPointPixelDialog(
-                    "Point B",
-                    "Enter the Ekahau coordinates for Point B.",
-                    fp.MetersPerUnit);
-                if (dlgB.ShowDialog() != true) return null;
-                double pxB_x = dlgB.PixelX, pxB_y = dlgB.PixelY;
-
-                // ── 4. Compute synthesised anchor ──
-                return BuildAnchorFromTwoPoints(
-                    revAx: ptA.X, revAy: ptA.Y, ekAx: pxA_x, ekAy: pxA_y,
-                    revBx: ptB.X, revBy: ptB.Y, ekBx: pxB_x, ekBy: pxB_y,
-                    fp:    fp);
+                if (intro.Show() != TaskDialogResult.CommandLink1) return null;
+                return OfferVisualAlignmentCore(uiDoc, view, fp, esxData);
             }
             finally
             {
@@ -2244,112 +2197,6 @@ namespace EkahauRevitPlugin
             }
         }
 
-        /// <summary>
-        /// From two point correspondences (Revit feet ↔ Ekahau pixels),
-        /// compute scale + translation and synthesise an
-        /// <see cref="EsxRevitAnchorData"/>.  Assumes no rotation between
-        /// the two coordinate systems (Y is flipped per the standard
-        /// pixel-vs-world convention, but no in-plane rotation).
-        /// Returns null when the points are too close together to
-        /// determine a reliable scale.
-        /// </summary>
-        private static EsxRevitAnchorData BuildAnchorFromTwoPoints(
-            double revAx, double revAy, double ekAx, double ekAy,
-            double revBx, double revBy, double ekBx, double ekBy,
-            EsxFloorPlanData fp)
-        {
-            double dRev = Math.Sqrt(
-                (revBx - revAx) * (revBx - revAx) +
-                (revBy - revAy) * (revBy - revAy));
-            double dEk  = Math.Sqrt(
-                (ekBx  - ekAx)  * (ekBx  - ekAx)  +
-                (ekBy  - ekAy)  * (ekBy  - ekAy));
-            if (dRev < 0.1 || dEk < 0.1)
-            {
-                TaskDialog.Show("Calibration Error",
-                    "The two points are too close together (distance < 0.1).\n" +
-                    "Choose points that are far apart for a stable scale.");
-                return null;
-            }
-
-            // Scale: feet per Ekahau pixel
-            double ftPerPx = dRev / dEk;
-
-            // Sanity check vs the .esx's stated scale (metres per pixel)
-            double mpu = fp.MetersPerUnit > 0 ? fp.MetersPerUnit : 0.0264583;
-            double expectedFtPerPx = mpu / 0.3048;
-            double scaleErr = expectedFtPerPx > 0
-                ? Math.Abs(ftPerPx - expectedFtPerPx) / expectedFtPerPx : 0;
-            if (scaleErr > 0.20)
-            {
-                TaskDialog.Show("Calibration Warning",
-                    "Scale mismatch detected:\n" +
-                    $"  From your two points       : {ftPerPx * 304.8:F2} mm/pixel\n" +
-                    $"  From Ekahau metersPerUnit  : {mpu * 1000:F2} mm/pixel\n" +
-                    $"  Difference                 : {scaleErr * 100:F1} %\n\n" +
-                    "This may mean a reference point was entered incorrectly. " +
-                    "The plugin will use the scale from your two points anyway " +
-                    "— check the AP placement carefully.");
-            }
-
-            // Translation: pixel → world
-            //   wx = originX + ekx * ftPerPx
-            //   wy = originY - eky * ftPerPx        (Y flipped — pixel down, world up)
-            double originX = revAx - ekAx * ftPerPx;
-            double originY = revAy + ekAy * ftPerPx;
-
-            // Verify Point B (sanity)
-            double checkBx = originX + ekBx * ftPerPx;
-            double checkBy = originY - ekBy * ftPerPx;
-            double errB = Math.Sqrt(
-                (checkBx - revBx) * (checkBx - revBx) +
-                (checkBy - revBy) * (checkBy - revBy));
-
-            Debug.WriteLine(
-                $"[ESX Read] Two-point calibration: ftPerPx={ftPerPx:F6} " +
-                $"origin=({originX:F2},{originY:F2}) Point-B residual={errB:F3} ft");
-
-            if (errB > 1.0)
-            {
-                TaskDialog.Show("Calibration Note",
-                    $"Point B verification residual: {errB:F2} ft ({errB * 0.3048:F2} m).\n\n" +
-                    "If the floor plan is rotated relative to the Revit model, some " +
-                    "AP positions will be slightly off (this calibration model assumes " +
-                    "scale + translation only — no rotation).\n\n" +
-                    "For best accuracy, regenerate the .esx via ESX Export or DWG Export.");
-            }
-
-            // Synthesise a virtual CropBox that exactly fits the image at
-            // the calibrated scale.  BuildEkahauToRevitXform then handles
-            // the rest via Mode 2 (HasWorldBounds) — no special-casing.
-            double imgW = fp.Width;
-            double imgH = fp.Height;
-            double cropMinX = originX;
-            double cropMaxY = originY;                   // top-left of image in world
-            double cropMaxX = originX + imgW * ftPerPx;
-            double cropMinY = originY - imgH * ftPerPx;
-
-            return new EsxRevitAnchorData
-            {
-                CropWorldMinX_ft = cropMinX,
-                CropWorldMinY_ft = cropMinY,
-                CropWorldMaxX_ft = cropMaxX,
-                CropWorldMaxY_ft = cropMaxY,
-                MetersPerUnit    = ftPerPx * 0.3048,    // feet/px → m/px
-                ImageWidth       = (int)imgW,
-                ImageHeight      = (int)imgH,
-                CropPixelOffsetX = 0,
-                CropPixelOffsetY = 0,
-                CropPixelWidth   = imgW,
-                CropPixelHeight  = imgH,
-                LocalMinX        = cropMinX,
-                LocalMinY        = cropMinY,
-                LocalMaxX        = cropMaxX,
-                LocalMaxY        = cropMaxY,
-                HasWorldBounds   = true,
-                // No HasTransform — Mode 2 (simple bounds) handles this fine
-            };
-        }
 
         // ══════════════════════════════════════════════════════════════
         //  Tier 3b: Visual Alignment Calibration
