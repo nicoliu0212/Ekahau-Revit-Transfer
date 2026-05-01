@@ -1758,7 +1758,7 @@ namespace EkahauRevitPlugin
                 if (fp.RevitAnchor == null)
                 {
                     var manualAnchor = OfferTwoPointCalibration(
-                        uiDoc, view, fp, progress);
+                        uiDoc, view, fp, esxData, progress);
                     if (manualAnchor != null)
                     {
                         fp.RevitAnchor = manualAnchor;
@@ -2144,6 +2144,7 @@ namespace EkahauRevitPlugin
 
         private static EsxRevitAnchorData OfferTwoPointCalibration(
             UIDocument uiDoc, ViewPlan view, EsxFloorPlanData fp,
+            EsxReadResult esxData,
             EsxReadProgressWindow progress)
         {
             // Hide the progress popup so the user can interact with Revit
@@ -2170,16 +2171,27 @@ namespace EkahauRevitPlugin
                         "  3. Read the X / Y values (in metres) from the bottom status bar",
                 };
                 intro.AddCommandLink(TaskDialogCommandLinkId.CommandLink1,
-                    "Start two-point calibration",
-                    "You'll click two points in the view and enter Ekahau coordinates");
+                    "Visual alignment (recommended)",
+                    "The Ekahau image is dropped into the view; you click each point " +
+                    "TWICE — once on the model, once on the same point on the image. " +
+                    "Handles rotation automatically.  No need to look up coordinates.");
                 intro.AddCommandLink(TaskDialogCommandLinkId.CommandLink2,
+                    "Type Ekahau coordinates",
+                    "Click two points in the view and type their X / Y in metres or " +
+                    "pixels (read from Ekahau Pro's status bar).  Scale + translation " +
+                    "only — no rotation.");
+                intro.AddCommandLink(TaskDialogCommandLinkId.CommandLink3,
                     "Skip — use approximate placement",
                     "AP markers will be placed using the current view's CropBox " +
-                    "(may be off by several feet)");
+                    "(may be off by several feet).");
                 intro.CommonButtons = TaskDialogCommonButtons.None;
                 intro.DefaultButton = TaskDialogResult.CommandLink1;
 
-                if (intro.Show() != TaskDialogResult.CommandLink1) return null;
+                var introResp = intro.Show();
+                if (introResp == TaskDialogResult.CommandLink1)
+                    return OfferVisualAlignmentCore(uiDoc, view, fp, esxData);
+                if (introResp != TaskDialogResult.CommandLink2)
+                    return null;
 
                 // Make sure PickPoint targets the right view
                 try { uiDoc.ActiveView = view; uiDoc.RefreshActiveView(); DoEvents(); }
@@ -2337,6 +2349,423 @@ namespace EkahauRevitPlugin
                 HasWorldBounds   = true,
                 // No HasTransform — Mode 2 (simple bounds) handles this fine
             };
+        }
+
+        // ══════════════════════════════════════════════════════════════
+        //  Tier 3b: Visual Alignment Calibration
+        //
+        //  When the .esx has no revitAnchor and no .ekahau-cal.json (e.g.
+        //  designer worked from a PDF in Ekahau, never touched Revit), we
+        //  drop the Ekahau image into the view at an estimated position
+        //  and ask the user to pick TWO point pairs:
+        //
+        //      Pair 1:  click a point on the REVIT MODEL
+        //               click the SAME point on the EKAHAU IMAGE
+        //      Pair 2:  same, but at a different location far from Pair 1
+        //
+        //  From those two correspondences we recover scale + rotation +
+        //  translation, then re-place the image at the calibrated pose
+        //  for visual confirmation.  Far more intuitive than typing
+        //  Ekahau pixel/metre coordinates from another window.
+        //
+        //  The synthesised anchor uses HasTransform=true so the existing
+        //  Mode 1 BuildEkahauToRevitXform handles the rotation correctly.
+        // ══════════════════════════════════════════════════════════════
+
+        private static EsxRevitAnchorData OfferVisualAlignment(
+            UIDocument uiDoc, ViewPlan view, EsxFloorPlanData fp,
+            EsxReadResult esxData, EsxReadProgressWindow progress)
+        {
+            try { progress.Hide(); DoEvents(); } catch { }
+
+            try
+            {
+                return OfferVisualAlignmentCore(uiDoc, view, fp, esxData);
+            }
+            finally
+            {
+                try { progress.Show(); DoEvents(); } catch { }
+            }
+        }
+
+        private static EsxRevitAnchorData OfferVisualAlignmentCore(
+            UIDocument uiDoc, ViewPlan view, EsxFloorPlanData fp,
+            EsxReadResult esxData)
+        {
+            Document doc = view.Document;
+
+            // ── 1. Image bytes → temp file ──────────────────────────
+            byte[] imgBytes = null;
+            if (!string.IsNullOrEmpty(fp.ImageId))
+                esxData.ImageEntries.TryGetValue(fp.ImageId, out imgBytes);
+            if (imgBytes == null || imgBytes.Length < 100)
+            {
+                TaskDialog.Show("Visual Alignment",
+                    "The .esx has no usable floor-plan image — visual alignment can't run.");
+                return null;
+            }
+
+            string imgPath = Path.Combine(
+                Path.GetTempPath(),
+                $"EkahauVisCal_{Guid.NewGuid():N}.png");
+            try { File.WriteAllBytes(imgPath, imgBytes); }
+            catch { return null; }
+
+            int imgPxW, imgPxH;
+            try
+            {
+                using var img = System.Drawing.Image.FromFile(imgPath);
+                imgPxW = img.Width;
+                imgPxH = img.Height;
+            }
+            catch
+            {
+                TryDeleteFile(imgPath);
+                return null;
+            }
+
+            // ── 2. Initial placement at CropBox centre ──────────────
+            double mpu = fp.MetersPerUnit > 0 ? fp.MetersPerUnit : 0.0264583;
+            double initFtPerPx = mpu / 0.3048;
+            double initWidthFt  = imgPxW * initFtPerPx;
+            double initHeightFt = imgPxH * initFtPerPx;
+
+            // Compute CropBox world-space centre (handle rotated views)
+            var cb = view.CropBox;
+            var t  = cb.Transform;
+            var c0 = t.OfPoint(new XYZ(cb.Min.X, cb.Min.Y, 0));
+            var c1 = t.OfPoint(new XYZ(cb.Max.X, cb.Min.Y, 0));
+            var c2 = t.OfPoint(new XYZ(cb.Max.X, cb.Max.Y, 0));
+            var c3 = t.OfPoint(new XYZ(cb.Min.X, cb.Max.Y, 0));
+            double initCenterX = (c0.X + c1.X + c2.X + c3.X) / 4.0;
+            double initCenterY = (c0.Y + c1.Y + c2.Y + c3.Y) / 4.0;
+            double zElev = view.GenLevel?.Elevation ?? 0;
+
+            ElementId initImgId = null;
+            try
+            {
+                using var tx = new Transaction(doc, "Visual Cal — initial image");
+                tx.Start();
+                var imgType = VersionCompat.CreateImageType(doc, imgPath);
+                if (imgType == null) { tx.RollBack(); TryDeleteFile(imgPath); return null; }
+                var opts = new ImagePlacementOptions(
+                    new XYZ(initCenterX, initCenterY, zElev), BoxPlacement.Center);
+                var inst = ImageInstance.Create(doc, view, imgType.Id, opts);
+                try { inst.Width = initWidthFt; }
+                catch
+                {
+                    try
+                    {
+                        var p = inst.get_Parameter(BuiltInParameter.RASTER_SHEETWIDTH);
+                        if (p != null && !p.IsReadOnly) p.Set(initWidthFt);
+                    }
+                    catch { }
+                }
+                initImgId = inst.Id;
+                tx.Commit();
+            }
+            catch
+            {
+                TryDeleteFile(imgPath);
+                return null;
+            }
+
+            // Make sure the image is visible to the user
+            try { uiDoc.ActiveView = view; uiDoc.RefreshActiveView(); DoEvents(); } catch { }
+
+            // ── 3. Intro dialog ─────────────────────────────────────
+            var intro = new TaskDialog("ESX Read — Visual Alignment")
+            {
+                MainInstruction = $"Visually align the floor plan for \"{fp.Name}\"",
+                MainContent =
+                    "The Ekahau floor-plan image has been placed in the view at an " +
+                    "estimated position.  It is NOT correctly aligned yet — that's " +
+                    "expected.\n\n" +
+                    "You'll now pick TWO pairs of matching points:\n\n" +
+                    "  PAIR 1  — first click a point on the REVIT MODEL,\n" +
+                    "            then click the SAME point on the EKAHAU IMAGE.\n" +
+                    "  PAIR 2  — same again, far from Pair 1.\n\n" +
+                    "Tips:\n" +
+                    "  • Choose two points as far apart as possible.\n" +
+                    "  • Use easy-to-identify features (building corners, columns, " +
+                    "stair cores).\n" +
+                    "  • Zoom in for accuracy on each click.\n\n" +
+                    "After both pairs are picked, the image will snap into alignment " +
+                    "and AP positions will be mapped correctly.",
+            };
+            intro.AddCommandLink(TaskDialogCommandLinkId.CommandLink1,
+                "Start alignment — pick Pair 1");
+            intro.AddCommandLink(TaskDialogCommandLinkId.CommandLink2,
+                "Cancel");
+            intro.DefaultButton = TaskDialogResult.CommandLink1;
+
+            if (intro.Show() != TaskDialogResult.CommandLink1)
+            {
+                DeleteImageInTx(doc, initImgId, "Visual Cal — cancel");
+                TryDeleteFile(imgPath);
+                return null;
+            }
+
+            // ── 4. Pick 4 points (2 pairs) ──────────────────────────
+            XYZ modelPt1, imagePt1, modelPt2, imagePt2;
+            try
+            {
+                modelPt1 = uiDoc.Selection.PickPoint(
+                    "PAIR 1 / step 1 of 2 — click point on the REVIT MODEL");
+                imagePt1 = uiDoc.Selection.PickPoint(
+                    "PAIR 1 / step 2 of 2 — click the SAME point on the EKAHAU IMAGE");
+
+                TaskDialog.Show("Pair 1 captured",
+                    "Now pick PAIR 2.  Choose a point as FAR from Pair 1 as possible " +
+                    "for the most accurate scale + rotation.");
+
+                modelPt2 = uiDoc.Selection.PickPoint(
+                    "PAIR 2 / step 1 of 2 — click point on the REVIT MODEL");
+                imagePt2 = uiDoc.Selection.PickPoint(
+                    "PAIR 2 / step 2 of 2 — click the SAME point on the EKAHAU IMAGE");
+            }
+            catch (Autodesk.Revit.Exceptions.OperationCanceledException)
+            {
+                DeleteImageInTx(doc, initImgId, "Visual Cal — cancel");
+                TryDeleteFile(imgPath);
+                return null;
+            }
+            catch
+            {
+                DeleteImageInTx(doc, initImgId, "Visual Cal — cancel");
+                TryDeleteFile(imgPath);
+                return null;
+            }
+
+            // ── 5. Convert image-clicks (Revit world) → Ekahau pixels ──
+            // The initial image was placed at (initCenterX, initCenterY)
+            // with width = initWidthFt, height = initHeightFt, no rotation.
+            //   imgLeft = initCenterX − initWidthFt / 2
+            //   imgTop  = initCenterY + initHeightFt / 2
+            //   1 placed-foot = 1 pixel × initFtPerPx
+            double imgLeft = initCenterX - initWidthFt  / 2.0;
+            double imgTop  = initCenterY + initHeightFt / 2.0;
+            double placedFtPerPx = initWidthFt / imgPxW;
+
+            double ek1x = (imagePt1.X - imgLeft) / placedFtPerPx;
+            double ek1y = (imgTop - imagePt1.Y) / placedFtPerPx;   // pixel Y flipped
+            double ek2x = (imagePt2.X - imgLeft) / placedFtPerPx;
+            double ek2y = (imgTop - imagePt2.Y) / placedFtPerPx;
+
+            // ── 6. Compute scale + rotation ─────────────────────────
+            double modelDist = Math.Sqrt(
+                (modelPt2.X - modelPt1.X) * (modelPt2.X - modelPt1.X) +
+                (modelPt2.Y - modelPt1.Y) * (modelPt2.Y - modelPt1.Y));
+            double ekDist = Math.Sqrt(
+                (ek2x - ek1x) * (ek2x - ek1x) +
+                (ek2y - ek1y) * (ek2y - ek1y));
+
+            if (modelDist < 1.0 || ekDist < 10.0)
+            {
+                TaskDialog.Show("Visual Alignment — Error",
+                    "The two reference points are too close together to compute a " +
+                    "stable scale.  Try again and pick points farther apart.");
+                DeleteImageInTx(doc, initImgId, "Visual Cal — cancel");
+                TryDeleteFile(imgPath);
+                return null;
+            }
+
+            double ftPerPx    = modelDist / ekDist;
+            double modelAngle = Math.Atan2(modelPt2.Y - modelPt1.Y, modelPt2.X - modelPt1.X);
+            double ekAngle    = Math.Atan2(-(ek2y - ek1y), ek2x - ek1x);   // Y flip in pixel space
+            double rotation   = modelAngle - ekAngle;
+            double cosR       = Math.Cos(rotation);
+            double sinR       = Math.Sin(rotation);
+
+            // Sanity check vs declared metersPerUnit
+            double mpuFtPerPx = mpu / 0.3048;
+            double scaleErr   = mpuFtPerPx > 0
+                ? Math.Abs(ftPerPx - mpuFtPerPx) / mpuFtPerPx : 0;
+
+            // Verify Pair-2 residual
+            double dx2 = ek2x - ek1x, dy2 = -(ek2y - ek1y);
+            double checkX = modelPt1.X + (dx2 * cosR - dy2 * sinR) * ftPerPx;
+            double checkY = modelPt1.Y + (dx2 * sinR + dy2 * cosR) * ftPerPx;
+            double resFt  = Math.Sqrt(
+                (checkX - modelPt2.X) * (checkX - modelPt2.X) +
+                (checkY - modelPt2.Y) * (checkY - modelPt2.Y));
+            double rotDeg = rotation * 180.0 / Math.PI;
+
+            Debug.WriteLine(
+                $"[ESX Read] Visual cal: ftPerPx={ftPerPx:F6} rot={rotDeg:F2}° " +
+                $"residual={resFt:F3} ft  scale-err-vs-mpu={scaleErr * 100:F1}%");
+
+            // ── 7. Reposition + rotate the image ────────────────────
+            //   Pixel (imgPxW/2, imgPxH/2) → world via the calibrated transform
+            double cdx = (imgPxW / 2.0) - ek1x;
+            double cdy = -((imgPxH / 2.0) - ek1y);
+            double newCenterX = modelPt1.X + (cdx * cosR - cdy * sinR) * ftPerPx;
+            double newCenterY = modelPt1.Y + (cdx * sinR + cdy * cosR) * ftPerPx;
+            double newWidthFt = imgPxW * ftPerPx;
+
+            ElementId alignedImgId = null;
+            try
+            {
+                using var tx = new Transaction(doc, "Visual Cal — re-place image");
+                tx.Start();
+                try { doc.Delete(initImgId); } catch { }
+                var imgType2 = VersionCompat.CreateImageType(doc, imgPath);
+                if (imgType2 != null)
+                {
+                    var opts2 = new ImagePlacementOptions(
+                        new XYZ(newCenterX, newCenterY, zElev), BoxPlacement.Center);
+                    var inst2 = ImageInstance.Create(doc, view, imgType2.Id, opts2);
+                    try { inst2.Width = newWidthFt; } catch { }
+                    alignedImgId = inst2.Id;
+
+                    if (Math.Abs(rotation) > 1e-4)
+                    {
+                        try
+                        {
+                            var axis = Line.CreateBound(
+                                new XYZ(newCenterX, newCenterY, zElev),
+                                new XYZ(newCenterX, newCenterY, zElev + 1));
+                            ElementTransformUtils.RotateElement(doc, alignedImgId, axis, rotation);
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.WriteLine($"[ESX Read] Image rotation failed: {ex.Message}");
+                        }
+                    }
+                }
+                tx.Commit();
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[ESX Read] Image re-placement failed: {ex.Message}");
+            }
+            try { uiDoc.RefreshActiveView(); DoEvents(); } catch { }
+
+            // ── 8. Verification dialog (continue / retry / cancel) ─
+            var verify = new TaskDialog("Visual Alignment — Verify")
+            {
+                MainInstruction = "Confirm alignment is correct",
+                MainContent =
+                    $"Scale:    1 px = {ftPerPx * 304.8:F2} mm\n" +
+                    $"Rotation: {rotDeg:F1}°\n" +
+                    $"Pair-2 residual: {resFt * 304.8:F1} mm  " +
+                    $"({(resFt > 1.0 ? "high — check pair selection" : "good")})\n" +
+                    (scaleErr > 0.20
+                        ? $"⚠ Scale differs from .esx metersPerUnit by {scaleErr * 100:F1}% — " +
+                          "double-check your picks.\n"
+                        : "") +
+                    "\n" +
+                    "Look at the view.  Do the image walls now line up with the Revit " +
+                    "model walls?\n\n" +
+                    "If alignment is wrong, retry — typical causes:\n" +
+                    "  • The two pairs are too close together\n" +
+                    "  • You clicked slightly off the matching point on the image\n" +
+                    "  • The image and model represent different floors",
+            };
+            verify.AddCommandLink(TaskDialogCommandLinkId.CommandLink1,
+                "Alignment correct — continue with AP markers");
+            verify.AddCommandLink(TaskDialogCommandLinkId.CommandLink2,
+                "Wrong — retry with new point pairs");
+            verify.AddCommandLink(TaskDialogCommandLinkId.CommandLink3,
+                "Cancel — skip this floor");
+            verify.DefaultButton = TaskDialogResult.CommandLink1;
+
+            var resp = verify.Show();
+
+            // Always delete the alignment image — the per-floor verification
+            // step that runs immediately after will re-place a fresh overlay
+            // using the calibrated anchor.  Avoids duplicate ImageInstances.
+            DeleteImageInTx(doc, alignedImgId, "Visual Cal — done");
+            TryDeleteFile(imgPath);
+
+            if (resp == TaskDialogResult.CommandLink2)
+                return OfferVisualAlignmentCore(uiDoc, view, fp, esxData);  // retry
+            if (resp == TaskDialogResult.CommandLink3)
+                return null;
+
+            // ── 9. Build EsxRevitAnchorData (Mode 1, with rotation) ──
+            //   The Mode-1 transform builder applies:
+            //       vx = lMinX + (ex - offX) / cW * cropW
+            //       vy = lMaxY - (ey - offY) / cH * cropH
+            //       wx = oX + bXx * vx + bYx * vy
+            //       wy = oY + bXy * vx + bYy * vy
+            //   We pick the local + basis fields so this evaluates to
+            //   exactly our visual-alignment formula:
+            //       wx = anchorRevitX + (dx*cosR - dy*sinR) * ftPerPx
+            //       wy = anchorRevitY + (dx*sinR + dy*cosR) * ftPerPx
+            //   where dx = ex - anchorEkX, dy = -(ey - anchorEkY).
+            double anchorEkX = ek1x, anchorEkY = ek1y;
+            double anchorRX  = modelPt1.X, anchorRY = modelPt1.Y;
+
+            // World-space AABB for informational fields (not used by Mode 1
+            // but populated for completeness and downstream logging).
+            double minWX = double.MaxValue, maxWX = double.MinValue;
+            double minWY = double.MaxValue, maxWY = double.MinValue;
+            void TransformPx(double px, double py)
+            {
+                double ddx = px - anchorEkX;
+                double ddy = -(py - anchorEkY);
+                double wx = anchorRX + (ddx * cosR - ddy * sinR) * ftPerPx;
+                double wy = anchorRY + (ddx * sinR + ddy * cosR) * ftPerPx;
+                if (wx < minWX) minWX = wx;
+                if (wx > maxWX) maxWX = wx;
+                if (wy < minWY) minWY = wy;
+                if (wy > maxWY) maxWY = wy;
+            }
+            TransformPx(0, 0);
+            TransformPx(imgPxW, 0);
+            TransformPx(imgPxW, imgPxH);
+            TransformPx(0, imgPxH);
+
+            return new EsxRevitAnchorData
+            {
+                CropWorldMinX_ft = minWX,
+                CropWorldMinY_ft = minWY,
+                CropWorldMaxX_ft = maxWX,
+                CropWorldMaxY_ft = maxWY,
+
+                MetersPerUnit    = ftPerPx * 0.3048,
+                ImageWidth       = imgPxW,
+                ImageHeight      = imgPxH,
+                CropPixelOffsetX = 0,
+                CropPixelOffsetY = 0,
+                CropPixelWidth   = imgPxW,
+                CropPixelHeight  = imgPxH,
+
+                // Local bounds (chosen so vx = (ex - anchorEkX)*ftPerPx,
+                // vy = (anchorEkY - ey)*ftPerPx — see the maths above).
+                LocalMinX = -anchorEkX * ftPerPx,
+                LocalMaxX = (imgPxW - anchorEkX) * ftPerPx,
+                LocalMinY = -(imgPxH - anchorEkY) * ftPerPx,
+                LocalMaxY = anchorEkY * ftPerPx,
+
+                XformOriginX_ft = anchorRX,
+                XformOriginY_ft = anchorRY,
+                XformBasisXx    = cosR,
+                XformBasisXy    = sinR,
+                XformBasisYx    = -sinR,
+                XformBasisYy    = cosR,
+
+                HasWorldBounds = true,
+                HasTransform   = true,
+            };
+        }
+
+        /// <summary>
+        /// Delete an element inside a small dedicated transaction.  Never
+        /// throws — safe to call even when the element is already gone.
+        /// </summary>
+        private static void DeleteImageInTx(Document doc, ElementId id, string txName)
+        {
+            if (id == null || id == ElementId.InvalidElementId) return;
+            try
+            {
+                using var tx = new Transaction(doc, txName);
+                tx.Start();
+                try { doc.Delete(id); } catch { }
+                tx.Commit();
+            }
+            catch { }
         }
 
         // ──────────────────────────────────────────────────────────────

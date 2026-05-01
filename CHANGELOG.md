@@ -5,6 +5,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.0] — 2026-04-22
+
+### Added
+- **ESX Read — Visual two-point alignment** (Tier 3b calibration). When a `.esx` has no `revitAnchor` and no `.ekahau-cal.json`, the user can now visually align the floor plan instead of typing Ekahau coordinates:
+  1. Plugin drops the Ekahau image into the matched view at an estimated position
+  2. User clicks **two pairs** of matching points: each pair = same point clicked once on the Revit model and once on the floor-plan image (in the same view)
+  3. Plugin recovers **scale + rotation + translation** from the two correspondences
+  4. Image snaps into the calibrated pose (rotation included) for visual verification
+  5. Verification dialog shows scale (mm/px), rotation (°), Pair-2 residual (mm), with retry / continue / cancel
+- The synthesised `EsxRevitAnchorData` populates `XformBasisXx/XY/YX/YY` (rotation matrix) so the existing Mode-1 `BuildEkahauToRevitXform` handles rotation correctly — no special-casing in the AP-coordinate pipeline.
+- The manual-calibration intro dialog now offers three options: **Visual alignment (recommended)** / Type Ekahau coordinates / Skip.
+
+### Why
+Designer creates the Ekahau project from a PDF (no Revit involvement) → the resulting `.esx` has no coordinate relationship to the Revit model. Typing Ekahau pixel coordinates from another window is error-prone. Clicking the same point twice — once on the model, once on the image — is more intuitive and naturally handles rotation between the two coordinate systems.
+
 ## [2.4.1] — 2026-04-22
 
 ### Added
