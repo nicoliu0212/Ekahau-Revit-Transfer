@@ -85,6 +85,25 @@ namespace EkahauRevitPlugin
             // NOTE: Heat Map panel/button intentionally not added here yet —
             // the HeatMapCommand class has not been implemented.
 
+            // ── Panel 3: Help / About ───────────────────────────────
+            var panelHelp = application.CreateRibbonPanel(tabName, "Help");
+
+            var aboutBtn = new PushButtonData(
+                "About",
+                "About",
+                assemblyPath,
+                "EkahauRevitPlugin.AboutCommand")
+            {
+                ToolTip = "Show plugin version, install path, runtime, and links to " +
+                          $"the GitHub project.\n\nCurrent version: v{VersionInfo.Version}",
+                LongDescription =
+                    "Lightweight About dialog — no admin or network call required. " +
+                    "Useful for confirming what's installed, checking for updates, " +
+                    "or grabbing the install path when reporting an issue.",
+            };
+            ApplyIcons(aboutBtn, "About_32.png", "About_16.png");
+            panelHelp.AddItem(aboutBtn);
+
             return Result.Succeeded;
         }
 

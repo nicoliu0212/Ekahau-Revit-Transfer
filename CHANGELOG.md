@@ -5,6 +5,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.1] — 2026-05-01
+
+### Added
+- **About / Version dialog** — new ribbon button on a small "Help" panel. Shows:
+  - Plugin version + release date + last build timestamp of the loaded DLL
+  - .NET runtime (Framework 4.8 / .NET 8 / .NET 10)
+  - Detected Revit version
+  - Install scope (Per-user / All-users) — auto-detected from DLL path
+  - Full DLL path
+  - Buttons: open project page, view releases (check for updates), report issue, open install folder
+
+### Confirmed
+- MSI install scope is **per-user** under `%APPDATA%\Autodesk\Revit\Addins\YYYY\` (set in v2.4.0). No UAC prompt, no admin required, no writes to Program Files / ProgramData / HKLM. Suitable for IT-managed machines that block writes to system locations.
+
 ## [2.5.0] — 2026-04-22
 
 ### Added
