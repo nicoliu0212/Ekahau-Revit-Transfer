@@ -28,8 +28,15 @@
   <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
     <PackageReference Include="Autodesk.Revit.SDK" Version="2024.0.0"
                       IncludeAssets="compile" PrivateAssets="all" />
-    <!-- System.Text.Json isn't part of .NET Framework — pull it in. -->
-    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+    <!-- System.Text.Json isn't part of .NET Framework — pull it in.
+         6.0.10 is the last version that compiles cleanly against the
+         net48 facade graph; 7.x/8.x add transitive references to
+         System.Runtime 8.0.0.0 (a .NET 8 facade) that .NET Framework
+         can't resolve, and Revit doesn't honour .dll.config binding
+         redirects so we can't paper over it.  6.0.10 is also fully
+         supported by Microsoft and includes all the features we use
+         (basic Serialize / Deserialize / JsonDocument / JsonConverter). -->
+    <PackageReference Include="System.Text.Json" Version="6.0.10" />
     <!-- ZipArchive lives in System.IO.Compression on .NET Framework. -->
     <Reference Include="System.IO.Compression" />
     <Reference Include="System.IO.Compression.FileSystem" />

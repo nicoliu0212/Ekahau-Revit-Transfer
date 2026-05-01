@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.3] — 2026-05-01
+
+### Fixed
+- **Revit 2024 / 2023 startup crash**: `System.IO.FileNotFoundException: Could not load file or assembly 'System.Runtime, Version=8.0.0.0'`. Caused by `System.Text.Json 8.0.5` (the version we pulled in v2.5.2) which has transitive references to `System.Runtime 8.0.0.0` — a .NET 8 facade assembly that doesn't exist on .NET Framework 4.8.  Revit also doesn't honour `<dll>.dll.config` binding redirects so a redirect-based fix was off the table.
+- Pinned `System.Text.Json` to `6.0.10` for the net48 build — the last version that compiles cleanly against the net48 facade graph (all references resolve to net48-compatible BCL polyfills like `System.Memory 4.0.1.1`, `Microsoft.Bcl.AsyncInterfaces 6.0.0.0`).
+- Verified via `MetadataLoadContext` that the new `System.Text.Json.dll` references contain **no `8.0.0.0` versions** — only 4.x / 6.x facades that .NET Framework 4.8 can load.
+
+### Unaffected
+- net8 (Revit 2025 / 2026) and net10 (Revit 2027) builds are unchanged — those runtimes ship `System.Text.Json` in the BCL itself, no NuGet needed.
+
 ## [2.5.2] — 2026-05-01
 
 ### Fixed
