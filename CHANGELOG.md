@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.2] — 2026-05-01
+
+### Fixed
+- **MSI now installs to Revit 2023 + 2024** in addition to 2025/2026/2027. Previous releases skipped the legacy versions because the net48 build needs 8 supporting BCL DLLs (System.Text.Json + dependencies) which were only available via `install.ps1`. v2.5.2 ships those DLLs inside the MSI so a single double-click covers all five Revit versions.
+
+### Changed
+- MSI grew from ~232 KB to ~440 KB to accommodate the net48 BCL DLLs for Revit 2023 / 2024.
+- Per-user AppData install scope unchanged — all five versions install to `%APPDATA%\Autodesk\Revit\Addins\YYYY\` with no admin / UAC.
+
 ## [2.5.1] — 2026-05-01
 
 ### Added

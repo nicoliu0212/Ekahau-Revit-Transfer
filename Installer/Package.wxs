@@ -2,20 +2,25 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
 
   <!-- ════════════════════════════════════════════════════════════════ -->
-  <!--  Per-user installer for Revit 2025 / 2026 / 2027                  -->
+  <!--  Per-user installer for Revit 2023 / 2024 / 2025 / 2026 / 2027    -->
   <!--                                                                    -->
   <!--  Installs everything under %APPDATA%\Autodesk\Revit\Addins\YYYY\  -->
   <!--  No admin / UAC required.  Files only visible to the installing   -->
   <!--  user — does not write to Program Files or ProgramData.            -->
   <!--                                                                    -->
-  <!--  Revit accepts add-in manifests from %APPDATA%\Autodesk\Revit\    -->
-  <!--  Addins\YYYY\ for every version 2017+ including 2027 (per-user    -->
-  <!--  path was unaffected by the 2027 all-users path change).           -->
+  <!--  Runtime per Revit version:                                        -->
+  <!--    Revit 2023 / 2024  →  net48     (.NET Framework 4.8)            -->
+  <!--    Revit 2025 / 2026  →  net8      (.NET 8)                        -->
+  <!--    Revit 2027         →  net10     (.NET 10)                       -->
+  <!--                                                                    -->
+  <!--  The net48 build needs 8 supporting BCL DLLs (System.Text.Json    -->
+  <!--  and friends) shipped alongside the plugin.  Net8/net10 don't —    -->
+  <!--  those runtimes include System.Text.Json in the framework.         -->
   <!-- ════════════════════════════════════════════════════════════════ -->
 
   <Package Name="Ekahau WiFi Tools for Revit"
            Manufacturer="Ekahau Transfer"
-           Version="2.5.1.0"
+           Version="2.5.2.0"
            UpgradeCode="F7A3B2C1-D4E5-6789-ABCD-0123456789AB"
            Scope="perUser"
            InstallerVersion="500">
@@ -33,6 +38,12 @@
         <Directory Id="DIR_Revit" Name="Revit">
           <Directory Id="DIR_Addins" Name="Addins">
 
+            <Directory Id="DIR_2023" Name="2023">
+              <Directory Id="DIR_2023_Plugin" Name="EkahauWiFiTools" />
+            </Directory>
+            <Directory Id="DIR_2024" Name="2024">
+              <Directory Id="DIR_2024_Plugin" Name="EkahauWiFiTools" />
+            </Directory>
             <Directory Id="DIR_2025" Name="2025">
               <Directory Id="DIR_2025_Plugin" Name="EkahauWiFiTools" />
             </Directory>
@@ -47,6 +58,108 @@
         </Directory>
       </Directory>
     </StandardDirectory>
+
+    <!-- ============================================================ -->
+    <!--  Revit 2023 — net48 build  (+ 8 supporting BCL DLLs)          -->
+    <!-- ============================================================ -->
+    <ComponentGroup Id="Cg_2023_Manifest" Directory="DIR_2023">
+      <Component Id="Cmp_2023_Addin" Guid="A1111111-B222-C333-D444-E55555555523">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net48\EkahauRevitPlugin.addin"
+              Name="EkahauRevitPlugin.addin" KeyPath="yes" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\EkahauTransfer\EkahauWiFiTools\Revit2023"
+                       Name="installed" Type="integer" Value="1" />
+      </Component>
+    </ComponentGroup>
+    <ComponentGroup Id="Cg_2023_Plugin" Directory="DIR_2023_Plugin">
+      <Component Id="Cmp_2023_Dll" Guid="B2222222-C333-D444-E555-F66666666623">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net48\EkahauRevitPlugin.dll"
+              Name="EkahauRevitPlugin.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Cmp_2023_Bcl_Async" Guid="D4444444-E555-F666-A777-B88888888823">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net48\Microsoft.Bcl.AsyncInterfaces.dll"
+              Name="Microsoft.Bcl.AsyncInterfaces.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Cmp_2023_Bcl_Buffers" Guid="D4444444-E555-F666-A777-B88888888824">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net48\System.Buffers.dll"
+              Name="System.Buffers.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Cmp_2023_Bcl_Memory" Guid="D4444444-E555-F666-A777-B88888888825">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net48\System.Memory.dll"
+              Name="System.Memory.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Cmp_2023_Bcl_Vectors" Guid="D4444444-E555-F666-A777-B88888888826">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net48\System.Numerics.Vectors.dll"
+              Name="System.Numerics.Vectors.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Cmp_2023_Bcl_Unsafe" Guid="D4444444-E555-F666-A777-B88888888827">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net48\System.Runtime.CompilerServices.Unsafe.dll"
+              Name="System.Runtime.CompilerServices.Unsafe.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Cmp_2023_Bcl_TextEnc" Guid="D4444444-E555-F666-A777-B88888888828">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net48\System.Text.Encodings.Web.dll"
+              Name="System.Text.Encodings.Web.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Cmp_2023_Bcl_TextJson" Guid="D4444444-E555-F666-A777-B88888888829">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net48\System.Text.Json.dll"
+              Name="System.Text.Json.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Cmp_2023_Bcl_Tasks" Guid="D4444444-E555-F666-A777-B8888888882A">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net48\System.Threading.Tasks.Extensions.dll"
+              Name="System.Threading.Tasks.Extensions.dll" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- ============================================================ -->
+    <!--  Revit 2024 — net48 build (same DLLs as 2023)                 -->
+    <!-- ============================================================ -->
+    <ComponentGroup Id="Cg_2024_Manifest" Directory="DIR_2024">
+      <Component Id="Cmp_2024_Addin" Guid="A1111111-B222-C333-D444-E55555555524">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net48\EkahauRevitPlugin.addin"
+              Name="EkahauRevitPlugin.addin" KeyPath="yes" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\EkahauTransfer\EkahauWiFiTools\Revit2024"
+                       Name="installed" Type="integer" Value="1" />
+      </Component>
+    </ComponentGroup>
+    <ComponentGroup Id="Cg_2024_Plugin" Directory="DIR_2024_Plugin">
+      <Component Id="Cmp_2024_Dll" Guid="B2222222-C333-D444-E555-F66666666624">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net48\EkahauRevitPlugin.dll"
+              Name="EkahauRevitPlugin.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Cmp_2024_Bcl_Async" Guid="D4444444-E555-F666-A777-B88888888834">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net48\Microsoft.Bcl.AsyncInterfaces.dll"
+              Name="Microsoft.Bcl.AsyncInterfaces.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Cmp_2024_Bcl_Buffers" Guid="D4444444-E555-F666-A777-B88888888835">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net48\System.Buffers.dll"
+              Name="System.Buffers.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Cmp_2024_Bcl_Memory" Guid="D4444444-E555-F666-A777-B88888888836">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net48\System.Memory.dll"
+              Name="System.Memory.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Cmp_2024_Bcl_Vectors" Guid="D4444444-E555-F666-A777-B88888888837">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net48\System.Numerics.Vectors.dll"
+              Name="System.Numerics.Vectors.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Cmp_2024_Bcl_Unsafe" Guid="D4444444-E555-F666-A777-B88888888838">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net48\System.Runtime.CompilerServices.Unsafe.dll"
+              Name="System.Runtime.CompilerServices.Unsafe.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Cmp_2024_Bcl_TextEnc" Guid="D4444444-E555-F666-A777-B88888888839">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net48\System.Text.Encodings.Web.dll"
+              Name="System.Text.Encodings.Web.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Cmp_2024_Bcl_TextJson" Guid="D4444444-E555-F666-A777-B8888888883A">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net48\System.Text.Json.dll"
+              Name="System.Text.Json.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Cmp_2024_Bcl_Tasks" Guid="D4444444-E555-F666-A777-B8888888883B">
+        <File Source="..\EkahauRevitPlugin\bin\Release\net48\System.Threading.Tasks.Extensions.dll"
+              Name="System.Threading.Tasks.Extensions.dll" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
 
     <!-- ============================================================ -->
     <!--  Revit 2025 — net8 build                                      -->
@@ -96,9 +209,6 @@
 
     <!-- ============================================================ -->
     <!--  Revit 2027 — net10 build                                     -->
-    <!--  Uses the same per-user AppData path as 2025/2026.            -->
-    <!--  (Revit 2027's all-users path change to Program Files only    -->
-    <!--   affects the all-users location — per-user path is unchanged.)-->
     <!-- ============================================================ -->
     <ComponentGroup Id="Cg_2027_Manifest" Directory="DIR_2027">
       <Component Id="Cmp_2027_Addin" Guid="A1111111-B222-C333-D444-E55555555527">
@@ -122,6 +232,10 @@
 
     <!-- ============================================================ -->
     <Feature Id="MainFeature" Title="Ekahau WiFi Tools" Level="1">
+      <ComponentGroupRef Id="Cg_2023_Manifest" />
+      <ComponentGroupRef Id="Cg_2023_Plugin" />
+      <ComponentGroupRef Id="Cg_2024_Manifest" />
+      <ComponentGroupRef Id="Cg_2024_Plugin" />
       <ComponentGroupRef Id="Cg_2025_Manifest" />
       <ComponentGroupRef Id="Cg_2025_Plugin" />
       <ComponentGroupRef Id="Cg_2026_Manifest" />
