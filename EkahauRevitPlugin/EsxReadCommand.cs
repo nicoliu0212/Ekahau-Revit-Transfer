@@ -2068,36 +2068,49 @@ namespace EkahauRevitPlugin
                     "Alignment looks correct — continue",
                     "Proceed to place the AP crosshair markers in this view");
                 verify.AddCommandLink(TaskDialogCommandLinkId.CommandLink2,
-                    "Alignment is off — abort this floor",
-                    "Stop here for this floor.  Re-run ESX Export to generate a new .esx file");
+                    "Image is misaligned — manually align with two points",
+                    "Click 4 points (2 pairs) to fix position + scale + rotation. " +
+                    "Available even when revitAnchor exists but is wrong.");
                 verify.AddCommandLink(TaskDialogCommandLinkId.CommandLink3,
                     "Skip verification — continue anyway",
                     "Place AP markers without confirming alignment (advanced)");
-                verify.CommonButtons = TaskDialogCommonButtons.None;
+                verify.CommonButtons = TaskDialogCommonButtons.Cancel; // Cancel = abort floor
                 verify.DefaultButton = TaskDialogResult.CommandLink1;
 
                 var resp = verify.Show();
 
                 if (resp == TaskDialogResult.CommandLink2)
                 {
-                    // User says misaligned — roll back the overlay + crosses
-                    // so we don't leave clutter in the view.
-                    userAborted = true;
-                    if (created.Count > 0)
+                    // User wants to manually re-align.  Delete the current
+                    // overlay (we'll re-place at the calibrated pose), run
+                    // visual alignment, then RECURSE so the user gets a
+                    // fresh image at the corrected position + a verification
+                    // dialog they can either accept or re-align again.
+                    DeleteOverlayElements(doc, created, "ESX Read — pre-align cleanup");
+                    created.Clear();
+                    TryDeleteFile(imgPath);
+
+                    var newAnchor = OfferVisualAlignmentCore(
+                        uiDoc, view, fp, esxData, skipIntro: true);
+                    if (newAnchor != null)
                     {
-                        try
-                        {
-                            using var tx = new Transaction(doc, "ESX Read — Remove verification overlay");
-                            tx.Start();
-                            foreach (var id in created)
-                            {
-                                try { doc.Delete(id); } catch { }
-                            }
-                            tx.Commit();
-                        }
-                        catch { }
-                        created.Clear();
+                        fp.RevitAnchor = newAnchor;
+                        try { progress.Show(); DoEvents(); } catch { }
+                        return PlaceImageAndAskForVerification(
+                            doc, uiDoc, view, fp, esxData, progress, result, out userAborted);
                     }
+
+                    // Alignment cancelled — treat as floor abort
+                    userAborted = true;
+                    result.Warning = "Manual alignment cancelled.";
+                    return new List<ElementId>();
+                }
+                if (resp == TaskDialogResult.Cancel || resp == TaskDialogResult.Close)
+                {
+                    // Explicit abort
+                    userAborted = true;
+                    DeleteOverlayElements(doc, created, "ESX Read — Remove verification overlay");
+                    created.Clear();
 
                     result.Warning = "Aborted — alignment did not match.";
                     TaskDialog.Show("ESX Read — Aborted",
@@ -2126,6 +2139,28 @@ namespace EkahauRevitPlugin
         private static void TryDeleteFile(string path)
         {
             try { if (!string.IsNullOrEmpty(path) && File.Exists(path)) File.Delete(path); }
+            catch { }
+        }
+
+        /// <summary>
+        /// Best-effort delete of a list of overlay element IDs in a single
+        /// transaction.  Never throws — used by the verification dialog
+        /// when the user requests realignment or abort.
+        /// </summary>
+        private static void DeleteOverlayElements(
+            Document doc, List<ElementId> ids, string txName)
+        {
+            if (ids == null || ids.Count == 0) return;
+            try
+            {
+                using var tx = new Transaction(doc, txName);
+                tx.Start();
+                foreach (var id in ids)
+                {
+                    try { doc.Delete(id); } catch { }
+                }
+                tx.Commit();
+            }
             catch { }
         }
 
@@ -2237,7 +2272,8 @@ namespace EkahauRevitPlugin
 
         private static EsxRevitAnchorData OfferVisualAlignmentCore(
             UIDocument uiDoc, ViewPlan view, EsxFloorPlanData fp,
-            EsxReadResult esxData)
+            EsxReadResult esxData,
+            bool skipIntro = false)
         {
             Document doc = view.Document;
 
@@ -2320,7 +2356,11 @@ namespace EkahauRevitPlugin
             // Make sure the image is visible to the user
             try { uiDoc.ActiveView = view; uiDoc.RefreshActiveView(); DoEvents(); } catch { }
 
-            // ── 3. Intro dialog ─────────────────────────────────────
+            // ── 3. Intro dialog (skipped when called from verification
+            //   step where the user has already opted in via "Manually
+            //   align" — no need to nag them with a second confirmation).
+            if (skipIntro) goto pickPoints;
+
             var intro = new TaskDialog("ESX Read — Visual Alignment")
             {
                 MainInstruction = $"Visually align the floor plan for \"{fp.Name}\"",
@@ -2353,6 +2393,7 @@ namespace EkahauRevitPlugin
                 return null;
             }
 
+            pickPoints:
             // ── 4. Pick 4 points (2 pairs) ──────────────────────────
             XYZ modelPt1, imagePt1, modelPt2, imagePt2;
             try

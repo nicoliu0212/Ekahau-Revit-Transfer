@@ -5,6 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.5] — 2026-05-01
+
+### Changed
+- **Manual alignment now reachable from the per-floor verification step** — works for ALL calibration tiers, not just Tier 3. Previously the visual two-point alignment only ran when the .esx had no `revitAnchor` and no `.ekahau-cal.json`. Now even a Tier-1 (revitAnchor present) or Tier-2 (.cal.json found) auto-calibration can be manually corrected if the user spots misalignment in the verification overlay.
+- Verification dialog renamed CommandLink2 from **"Alignment is off — abort this floor"** to **"Image is misaligned — manually align with two points"**. Picking it triggers the visual two-point alignment, then recurses back into the verification step so the user can confirm or re-align again.
+- A separate **Cancel** button on the verification dialog still aborts the floor.
+- `OfferVisualAlignmentCore` gains a `skipIntro` parameter — when called from the verification step the intro dialog is skipped (the user already opted in via "Manually align").
+
+### Result
+- After a Bug Fix #14 scenario (anchor exists but is wrong), the user can now fix it in-place without re-running ESX Read or re-exporting the .esx.
+
 ## [2.5.4] — 2026-05-01
 
 ### Removed
