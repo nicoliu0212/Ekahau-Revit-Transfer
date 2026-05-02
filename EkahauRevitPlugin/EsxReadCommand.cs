@@ -2089,6 +2089,30 @@ namespace EkahauRevitPlugin
                 return created;
             }
 
+            // SVG normalisation — extract embedded raster if needed.
+            var norm = ImageNormalizer.NormalizeIfSvg(imgBytes);
+            if (norm.WasSvg && !norm.ExtractionSucceeded)
+            {
+                progress.Hide();
+                TaskDialog.Show("ESX Read — SVG Floor Plan Detected",
+                    $"The floor plan image for '{fp.Name}' is stored as an SVG " +
+                    "in the .esx file, but it doesn't contain an embedded raster " +
+                    "image that the plugin can extract.\n\n" +
+                    "Workaround:\n" +
+                    "  1. Open the .esx in Ekahau Pro\n" +
+                    "  2. Go to Project → Properties → Floor Plans\n" +
+                    "  3. Re-save the floor plan with PNG output enabled\n" +
+                    "  4. Save the .esx and try ESX Read again\n\n" +
+                    "Visual alignment verification is not available for this floor.");
+                progress.Show();
+                DoEvents();
+                result.Warning = "Floor plan is SVG without embedded raster — alignment skipped.";
+                return created;
+            }
+            imgBytes = norm.Bytes;
+            if (norm.WasSvg)
+                Debug.WriteLine($"[ESX Read] SVG detected, embedded raster extracted ({imgBytes.Length:N0} bytes).");
+
             // ── 2. Write image to a temp file (ImageType.Create takes a path) ──
             string imgPath = Path.Combine(
                 Path.GetTempPath(),
@@ -2576,6 +2600,23 @@ namespace EkahauRevitPlugin
                     $"Looked up image ID '{fp.ImageId}' in {esxData.ImageEntries.Count} entries.");
                 return null;
             }
+
+            // ── 1b. SVG normalisation (some .esx files store floor plans
+            //   as SVG wrappers around an embedded base64 raster).  When
+            //   SVG is detected, extract the embedded raster.
+            var norm = ImageNormalizer.NormalizeIfSvg(imgBytes);
+            if (norm.WasSvg && !norm.ExtractionSucceeded)
+            {
+                throw new InvalidOperationException(
+                    "The Ekahau floor plan is stored as an SVG without an " +
+                    "embedded raster — the plugin can't render arbitrary SVG " +
+                    "content yet.  In Ekahau Pro, open Project → Properties → " +
+                    "Floor Plans and re-save the floor plan with PNG output, " +
+                    "then re-export the .esx.");
+            }
+            imgBytes = norm.Bytes;
+            if (norm.WasSvg)
+                Debug.WriteLine($"[ESX Read] SVG detected, embedded raster extracted ({imgBytes.Length:N0} bytes).");
 
             string imgPath = Path.Combine(
                 Path.GetTempPath(),

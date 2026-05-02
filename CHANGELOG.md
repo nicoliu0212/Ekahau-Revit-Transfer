@@ -5,6 +5,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.11] — 2026-05-02
+
+### Fixed
+- **SVG floor-plan support** — some Ekahau exports store floor plans as SVG (XML) inside the `.esx` ZIP rather than raw PNG/JPEG. v2.5.10's hex dump diagnostic revealed the file content starts with `3C3F786D 6C207665` (`<?xml ve…`), confirming SVG/XML — which Revit's WIC engine cannot render directly. The plugin now detects SVG content and extracts the embedded base64-encoded raster (the typical Ekahau wrapper pattern), then hands the raster to Revit unchanged.
+
+### Added
+- New `ImageNormalizer` helper (`ImageNormalizer.cs`):
+  - `IsSvgOrXmlContent(bytes)` — sniffs UTF-8 BOM + leading whitespace, then checks for `<?xml` / `<svg` prefix.
+  - `TryExtractEmbeddedRaster(svgBytes)` — regex-extracts `<image href="data:image/png;base64,…">` (and the `xlink:href` variant), strips intra-attribute whitespace, base64-decodes the payload, returns the raster bytes.
+  - `NormalizeIfSvg(inputBytes)` — single-call helper returning `(Bytes, WasSvg, ExtractionSucceeded)`. Callers can branch on whether SVG was detected and whether extraction succeeded.
+- Both `PlaceImageAndAskForVerification` and `OfferVisualAlignmentCoreImpl` route image bytes through `NormalizeIfSvg` before writing to the temp file.
+- When SVG is detected but no embedded raster is found, the user sees a clear dialog with workaround steps (re-save with PNG output in Ekahau Pro) instead of an opaque "couldn't determine image dimensions" error.
+
+### Why this matters
+The user's `Related Digital Michigan 20251119.0_QC Review 1.esx` has a 102 MB SVG-wrapped floor plan. Without normalization, Revit's WIC engine refuses to decode the XML, the dimensions read fails, and the whole overlay/alignment flow short-circuits to "0 APs placed". With normalization, the embedded PNG raster is extracted (~typically a small fraction of the SVG size) and the existing pipeline runs unchanged.
+
+### Why we didn't add a full SVG renderer
+Full vector→raster SVG rendering (via Svg.NET or SkiaSharp.Svg) would add ~5 MB to the MSI and a NuGet dependency that complicates the multi-target net48/net8/net10 build. The base64-extraction approach handles the common Ekahau export pattern with zero new dependencies. We can revisit if a real "vector-only" SVG (no embedded raster) appears in the wild.
+
 ## [2.5.10] — 2026-05-02
 
 ### Added
