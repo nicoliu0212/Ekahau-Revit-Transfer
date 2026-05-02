@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.6] — 2026-05-01
+
+### Fixed
+- **Image overlay verification step was silently skipped when a floor had 0 APs.** The user reported "no overlay shown, no manual alignment offered, jumps straight to 0 APs placed". Two early-exit guards (`floorAps.Count == 0` for AP-to-floor-plan ID mismatches, and `apsToPlace.Count == 0` for user-unchecked-all) ran BEFORE the overlay step, so a wrong floor match or stale AP list would dismiss the floor with no visual feedback.
+
+### Changed
+- **Overlay verification now runs unconditionally per floor**, BEFORE the AP-count check. Users always get to confirm floor alignment + manually align if needed, even when zero APs end up matching this floor.
+- **New "no APs on this floor" diagnostic dialog**: when `floorAps.Count == 0`, the user now sees an explicit dialog explaining the AP-vs-floor-plan ID mismatch with the three most likely causes (truly empty floor / wrong view matched / floor renamed in Ekahau) — instead of a silent skip.
+- Added Debug.WriteLine of the AP→FloorPlan id matching: total AP count, this floor's match count, list of all distinct FloorPlanIds in the .esx. Visible in DebugView for troubleshooting.
+
 ## [2.5.5] — 2026-05-01
 
 ### Changed

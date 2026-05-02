@@ -1642,12 +1642,70 @@ namespace EkahauRevitPlugin
                 }
 
                 // ── Filter APs for this floor plan ────────────────────
+                //   Diagnostic logging: surfaces FloorPlanId mismatches
+                //   between .esx access points and the matched floor.
                 var floorAps = esxData.AccessPoints
                     .Where(ap => ap.FloorPlanId == fp.Id)
                     .ToList();
 
+                Debug.WriteLine(
+                    $"[ESX Read] Floor '{fp.Name}' (id={fp.Id}): " +
+                    $"{floorAps.Count}/{esxData.AccessPoints.Count} APs match. " +
+                    $"All AP FloorPlanIds: " +
+                    string.Join(",", esxData.AccessPoints.Select(a => a.FloorPlanId).Distinct()));
+
+                // ══════════════════════════════════════════════════════════
+                //  ALWAYS run the image overlay verification step, even when
+                //  this floor has zero APs.  Two reasons:
+                //    1. User can confirm floor matching is correct (a wrong
+                //       floor match is a common cause of "0 APs found").
+                //    2. User can manually align if calibration is wrong —
+                //       useful even with zero APs because it persists into
+                //       staging for any future re-run.
+                //  Previously the overlay step ran AFTER the AP-count gate,
+                //  which silently skipped verification whenever no APs
+                //  matched — leaving the user with "0 APs placed" and no
+                //  visual feedback about why.
+                // ══════════════════════════════════════════════════════════
+                var overlayIds_pre = PlaceImageAndAskForVerification(
+                    doc, uiDoc, view, fp, esxData, progress, result,
+                    out bool userAbortedVerification_pre);
+                allCreatedIds.AddRange(overlayIds_pre);
+
+                if (userAbortedVerification_pre)
+                {
+                    floorResults.Add(result);
+                    continue;
+                }
+
+                // After verification (and possibly manual alignment), the
+                // anchor may have changed — rebuild the xform.
+                try { xform = EsxCoordXform.BuildEkahauToRevitXform(fp, view, doc); }
+                catch { /* keep existing xform */ }
+
+                // Surface the "no APs" condition to the user EXPLICITLY,
+                // now that they've had a chance to verify the overlay.
                 if (floorAps.Count == 0)
                 {
+                    progress.Hide();
+                    var noApsDlg = new TaskDialog("ESX Read — No APs on this floor")
+                    {
+                        MainInstruction = $"No access points on \"{fp.Name}\"",
+                        MainContent =
+                            $"The .esx file has {esxData.AccessPoints.Count} AP(s) total, " +
+                            $"but none of them reference this floor plan's ID:\n" +
+                            $"  {fp.Id}\n\n" +
+                            "Possible causes:\n" +
+                            "  • The .esx truly has no APs on this floor (designed empty)\n" +
+                            "  • You matched the wrong Revit view to this Ekahau floor\n" +
+                            "  • The floor plan was renamed in Ekahau after AP placement\n\n" +
+                            "The overlay you just verified will be cleaned up.  " +
+                            "AP placement is skipped for this floor.",
+                    };
+                    noApsDlg.CommonButtons = TaskDialogCommonButtons.Ok;
+                    try { noApsDlg.Show(); } catch { }
+                    progress.Show(); DoEvents();
+
                     result.Warning = "No access points on this floor.";
                     floorResults.Add(result);
                     continue;
@@ -1727,22 +1785,11 @@ namespace EkahauRevitPlugin
                     catch { }
                 }
 
-                // ── Mandatory floor-plan overlay verification step ───
-                //  Always place the .esx PNG into the view as a reference
-                //  overlay + draw green corner crosses at the CropBox
-                //  bounds, then ask the user to confirm alignment before
-                //  committing AP markers.  This catches coordinate-
-                //  transform regressions early.
-                var overlayIds = PlaceImageAndAskForVerification(
-                    doc, uiDoc, view, fp, esxData, progress, result,
-                    out bool userAbortedVerification);
-                allCreatedIds.AddRange(overlayIds);
-
-                if (userAbortedVerification)
-                {
-                    floorResults.Add(result);
-                    continue;  // Skip AP placement; do NOT abort the whole run
-                }
+                // (Image overlay verification was already done above —
+                //  before the AP-count check — so the user always sees the
+                //  overlay even when this floor has zero APs.  Re-using
+                //  the captured overlay IDs here.)
+                var overlayIds = overlayIds_pre;
 
                 // ── Tier 3a: two-point manual calibration (optional) ─
                 //   When the floor plan still has no anchor (no
