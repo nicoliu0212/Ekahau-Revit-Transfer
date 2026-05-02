@@ -5,6 +5,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.8] — 2026-05-02
+
+### Fixed
+- **Manual alignment was failing silently** when invoked from the verification dialog — clicking "Image is misaligned — manually align" went straight to "0 APs placed" with no PickPoint, no intro, no error. User saw the verification dialog but the alignment workflow itself never appeared.
+
+### Added
+- Wrapped `OfferVisualAlignmentCore` in a top-level try/catch (`OfferVisualAlignmentCoreImpl` is the actual body now). Any unhandled exception is:
+  - Logged via `Debug.WriteLine` with full stack trace (DebugView)
+  - Surfaced to the user in a TaskDialog naming the exception type + message
+- Replaced 3 silent `return null` paths with explicit `throw new InvalidOperationException(...)` carrying the failed step name (write temp file / read PNG dimensions / create ImageType / place ImageInstance).
+- Added `Debug.WriteLine` checkpoints at every major step:
+  ```
+  [ESX Read] OfferVisualAlignmentCore: start (skipIntro=True, fp='Level 1')
+  [ESX Read] About to place initial image: center=(...,...,...), size=(...x...) ft
+  [ESX Read] Initial image placed, ElementId=12345
+  ```
+- Verification handler now wraps the alignment call in try/catch, surfacing any thrown exception as a TaskDialog so the user sees WHY alignment failed instead of a silent skip.
+
+### Result
+On v2.5.8 if you click "manually align" and it still fails, you'll see a precise error dialog (or DebugView trace) showing the exact step + exception type that caused the silent skip — no more guessing.
+
 ## [2.5.7] — 2026-05-02
 
 ### Fixed

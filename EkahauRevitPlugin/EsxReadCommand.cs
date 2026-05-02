@@ -2181,12 +2181,34 @@ namespace EkahauRevitPlugin
                     // visual alignment, then RECURSE so the user gets a
                     // fresh image at the corrected position + a verification
                     // dialog they can either accept or re-align again.
+                    Debug.WriteLine("[ESX Read] User clicked 'Manually align' — invoking visual alignment");
                     DeleteOverlayElements(doc, created, "ESX Read — pre-align cleanup");
                     created.Clear();
                     TryDeleteFile(imgPath);
 
-                    var newAnchor = OfferVisualAlignmentCore(
-                        uiDoc, view, fp, esxData, skipIntro: true);
+                    EsxRevitAnchorData newAnchor = null;
+                    try
+                    {
+                        newAnchor = OfferVisualAlignmentCore(
+                            uiDoc, view, fp, esxData, skipIntro: true);
+                        Debug.WriteLine($"[ESX Read] OfferVisualAlignmentCore returned: " +
+                            (newAnchor != null ? "anchor (success)" : "null (cancelled or error)"));
+                    }
+                    catch (Exception exVis)
+                    {
+                        Debug.WriteLine(
+                            $"[ESX Read] Visual alignment threw: {exVis.GetType().Name}: {exVis.Message}");
+                        try
+                        {
+                            TaskDialog.Show("Visual Alignment — Error",
+                                "Visual alignment threw an unexpected error:\n\n" +
+                                $"{exVis.GetType().Name}: {exVis.Message}\n\n" +
+                                "Please screenshot this dialog when reporting the issue.\n" +
+                                "AP markers will not be placed for this floor.");
+                        }
+                        catch { }
+                    }
+
                     if (newAnchor != null)
                     {
                         fp.RevitAnchor = newAnchor;
@@ -2195,9 +2217,9 @@ namespace EkahauRevitPlugin
                             doc, uiDoc, view, fp, esxData, progress, result, out userAborted);
                     }
 
-                    // Alignment cancelled — treat as floor abort
+                    // Alignment cancelled or failed — treat as floor abort
                     userAborted = true;
-                    result.Warning = "Manual alignment cancelled.";
+                    result.Warning = "Manual alignment did not complete.";
                     return new List<ElementId>();
                 }
                 if (resp == TaskDialogResult.Cancel || resp == TaskDialogResult.Close)
@@ -2400,7 +2422,42 @@ namespace EkahauRevitPlugin
             EsxReadResult esxData,
             bool skipIntro = false)
         {
+            try
+            {
+                return OfferVisualAlignmentCoreImpl(uiDoc, view, fp, esxData, skipIntro);
+            }
+            catch (Autodesk.Revit.Exceptions.OperationCanceledException)
+            {
+                Debug.WriteLine("[ESX Read] Visual alignment cancelled by user (Esc).");
+                return null;
+            }
+            catch (Exception ex)
+            {
+                // SURFACE every previously-silent failure so the user
+                // can report what's wrong instead of seeing "0 APs placed".
+                Debug.WriteLine(
+                    $"[ESX Read] Visual alignment unhandled exception: " +
+                    $"{ex.GetType().FullName}: {ex.Message}\n{ex.StackTrace}");
+                try
+                {
+                    TaskDialog.Show("Visual Alignment — Error",
+                        "Visual alignment failed with an unexpected error:\n\n" +
+                        $"{ex.GetType().Name}: {ex.Message}\n\n" +
+                        "AP markers will not be placed for this floor.\n" +
+                        "Please screenshot this dialog when reporting the issue.");
+                }
+                catch { }
+                return null;
+            }
+        }
+
+        private static EsxRevitAnchorData OfferVisualAlignmentCoreImpl(
+            UIDocument uiDoc, ViewPlan view, EsxFloorPlanData fp,
+            EsxReadResult esxData,
+            bool skipIntro)
+        {
             Document doc = view.Document;
+            Debug.WriteLine($"[ESX Read] OfferVisualAlignmentCore: start (skipIntro={skipIntro}, fp='{fp?.Name}')");
 
             // ── 1. Image bytes → temp file ──────────────────────────
             //   Same robust lookup as PlaceImageAndAskForVerification:
@@ -2418,7 +2475,11 @@ namespace EkahauRevitPlugin
                 Path.GetTempPath(),
                 $"EkahauVisCal_{Guid.NewGuid():N}.png");
             try { File.WriteAllBytes(imgPath, imgBytes); }
-            catch { return null; }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    $"Could not write temp image to '{imgPath}': {ex.Message}", ex);
+            }
 
             int imgPxW, imgPxH;
             try
@@ -2427,10 +2488,11 @@ namespace EkahauRevitPlugin
                 imgPxW = img.Width;
                 imgPxH = img.Height;
             }
-            catch
+            catch (Exception ex)
             {
                 TryDeleteFile(imgPath);
-                return null;
+                throw new InvalidOperationException(
+                    $"Could not read PNG dimensions from '{imgPath}': {ex.Message}", ex);
             }
 
             // ── 2. Initial placement at CropBox centre ──────────────
@@ -2450,13 +2512,26 @@ namespace EkahauRevitPlugin
             double initCenterY = (c0.Y + c1.Y + c2.Y + c3.Y) / 4.0;
             double zElev = view.GenLevel?.Elevation ?? 0;
 
+            Debug.WriteLine($"[ESX Read] About to place initial image: " +
+                $"center=({initCenterX:F2},{initCenterY:F2},{zElev:F2}) ft, " +
+                $"size=({initWidthFt:F2}x{initHeightFt:F2}) ft, " +
+                $"image=({imgPxW}x{imgPxH}) px");
+
             ElementId initImgId = null;
             try
             {
                 using var tx = new Transaction(doc, "Visual Cal — initial image");
                 tx.Start();
                 var imgType = VersionCompat.CreateImageType(doc, imgPath);
-                if (imgType == null) { tx.RollBack(); TryDeleteFile(imgPath); return null; }
+                if (imgType == null)
+                {
+                    tx.RollBack();
+                    TryDeleteFile(imgPath);
+                    throw new InvalidOperationException(
+                        "VersionCompat.CreateImageType returned null. " +
+                        "Check that the temp PNG file is valid and that the " +
+                        "Revit API supports ImageType.Create on this version.");
+                }
                 var opts = new ImagePlacementOptions(
                     new XYZ(initCenterX, initCenterY, zElev), BoxPlacement.Center);
                 var inst = ImageInstance.Create(doc, view, imgType.Id, opts);
@@ -2472,10 +2547,13 @@ namespace EkahauRevitPlugin
                 }
                 initImgId = inst.Id;
                 tx.Commit();
+                Debug.WriteLine($"[ESX Read] Initial image placed, ElementId={VersionCompat.GetIdValue(initImgId)}");
             }
-            catch
+            catch (Exception ex)
             {
                 TryDeleteFile(imgPath);
+                throw new InvalidOperationException(
+                    $"Could not place initial image overlay: {ex.Message}", ex);
                 return null;
             }
 
