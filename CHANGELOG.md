@@ -5,6 +5,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.9] — 2026-05-02
+
+### Fixed
+- **Image dimension read no longer goes through GDI+** — was throwing `System.OutOfMemoryException` (a GDI+ misnomer that actually means "I don't understand this PNG variant"). Ekahau's `.esx` PNGs use 16-bit color depth or exotic interlace modes that GDI+ rejects, even though the files are perfectly valid PNGs.
+- **Visual alignment overlay is now placed correctly** — was silently failing on Ekahau-exported PNGs because both `PlaceFloorPlanImage` AND `OfferVisualAlignmentCore` used `System.Drawing.Image.FromFile`. v2.5.8 surfaced the error; v2.5.9 fixes the underlying cause.
+
+### Added
+- New `ReadImageDimensions(path)` helper parses the PNG IHDR chunk directly from file bytes — no GDI+ dependency. Reads:
+  - bytes 0-7   PNG signature `89 50 4E 47 0D 0A 1A 0A`
+  - bytes 16-19 Width (big-endian 32-bit)
+  - bytes 20-23 Height (big-endian 32-bit)
+
+  Falls back to GDI+ for non-PNG formats (JPEG / BMP / TIFF). Returns `(0, 0)` only when both paths fail.
+
+- `EsxMarkerOps.PlaceFloorPlanImage` and `EsxReadCommand.OfferVisualAlignmentCoreImpl` both use the new helper. No more silent failures on Ekahau PNGs.
+
+### Why this works for Revit when GDI+ fails
+Revit's `ImageType.Create` uses Windows Imaging Component (WIC) under the hood, which is much more permissive about PNG variants than legacy GDI+. So Revit can place the image fine — we just couldn't read its dimensions to scale it. With the manual PNG header parse, dimensions come straight from the file bytes and Revit handles the rendering.
+
 ## [2.5.8] — 2026-05-02
 
 ### Fixed

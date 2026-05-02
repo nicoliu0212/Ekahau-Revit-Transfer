@@ -1221,21 +1221,15 @@ namespace EkahauRevitPlugin
             //   We trust the file over fp.Width/Height because the .esx
             //   image entries occasionally don't match the floorPlans.json
             //   declarations (Ekahau may have re-rasterised on save).
-            int actualPixelW, actualPixelH;
-            try
-            {
-                using var img = System.Drawing.Image.FromFile(imagePath);
-                actualPixelW = img.Width;
-                actualPixelH = img.Height;
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[ESX Read] Cannot read image dimensions: {ex.Message}");
-                return null;
-            }
+            //   Uses ReadImageDimensions (manual PNG header parse) to
+            //   bypass GDI+ which throws misleading "Out of memory" errors
+            //   for PNGs it doesn't fully understand (Ekahau's PNGs hit
+            //   this often — 16-bit color, exotic interlace, etc.).
+            var (actualPixelW, actualPixelH) = EsxReadCommand.ReadImageDimensions(imagePath);
             if (actualPixelW <= 0 || actualPixelH <= 0)
             {
-                Debug.WriteLine($"[ESX Read] Image has zero size: {actualPixelW}x{actualPixelH}");
+                Debug.WriteLine($"[ESX Read] Image has zero size or unreadable: " +
+                    $"{actualPixelW}x{actualPixelH}");
                 return null;
             }
             Debug.WriteLine(
@@ -2260,6 +2254,65 @@ namespace EkahauRevitPlugin
         }
 
         /// <summary>
+        /// Read image dimensions WITHOUT going through GDI+ /
+        /// System.Drawing.Image.FromFile.  GDI+ throws a misleading
+        /// OutOfMemoryException for any image format it doesn't fully
+        /// understand (16-bit PNG, exotic interlace, certain palette
+        /// variants — Ekahau's PNGs trip this regularly).
+        ///
+        /// We parse the PNG IHDR chunk directly:
+        ///   bytes  0..7   : PNG signature 89 50 4E 47 0D 0A 1A 0A
+        ///   bytes  8..11  : IHDR chunk length (always 13)
+        ///   bytes 12..15  : IHDR chunk type "IHDR"
+        ///   bytes 16..19  : Width  (big-endian 32-bit)
+        ///   bytes 20..23  : Height (big-endian 32-bit)
+        ///
+        /// Falls back to GDI+ for non-PNG formats (JPEG/BMP/etc).
+        /// Returns (0, 0) when neither path succeeds.
+        /// </summary>
+        internal static (int Width, int Height) ReadImageDimensions(string path)
+        {
+            // ── PNG fast path (manual header parse) ───────────────────
+            try
+            {
+                byte[] header = new byte[24];
+                using (var fs = File.OpenRead(path))
+                {
+                    int n = 0;
+                    while (n < 24)
+                    {
+                        int r = fs.Read(header, n, 24 - n);
+                        if (r <= 0) break;
+                        n += r;
+                    }
+                    if (n >= 24 &&
+                        header[0] == 0x89 && header[1] == 0x50 &&
+                        header[2] == 0x4E && header[3] == 0x47 &&
+                        header[4] == 0x0D && header[5] == 0x0A &&
+                        header[6] == 0x1A && header[7] == 0x0A)
+                    {
+                        int w = (header[16] << 24) | (header[17] << 16) |
+                                (header[18] <<  8) |  header[19];
+                        int h = (header[20] << 24) | (header[21] << 16) |
+                                (header[22] <<  8) |  header[23];
+                        if (w > 0 && h > 0) return (w, h);
+                    }
+                }
+            }
+            catch { /* fall through to GDI+ */ }
+
+            // ── GDI+ fallback (JPEG/BMP/TIFF/etc) ─────────────────────
+            try
+            {
+                using var img = System.Drawing.Image.FromFile(path);
+                return (img.Width, img.Height);
+            }
+            catch { /* both paths failed */ }
+
+            return (0, 0);
+        }
+
+        /// <summary>
         /// Robust lookup of image bytes for a floor plan.  Tries:
         ///   1. Exact match on fp.ImageId
         ///   2. fp.ImageId + common image extensions (.png/.jpg/.jpeg/.bmp)
@@ -2481,18 +2534,16 @@ namespace EkahauRevitPlugin
                     $"Could not write temp image to '{imgPath}': {ex.Message}", ex);
             }
 
-            int imgPxW, imgPxH;
-            try
-            {
-                using var img = System.Drawing.Image.FromFile(imgPath);
-                imgPxW = img.Width;
-                imgPxH = img.Height;
-            }
-            catch (Exception ex)
+            //   Use the GDI+-free PNG header parser to dodge
+            //   System.Drawing's misleading "Out of memory" errors for
+            //   PNGs it doesn't fully understand (Ekahau's PNGs hit this).
+            var (imgPxW, imgPxH) = ReadImageDimensions(imgPath);
+            if (imgPxW <= 0 || imgPxH <= 0)
             {
                 TryDeleteFile(imgPath);
                 throw new InvalidOperationException(
-                    $"Could not read PNG dimensions from '{imgPath}': {ex.Message}", ex);
+                    $"Could not determine image dimensions from '{imgPath}'. " +
+                    "The file may be corrupt or in an unsupported format.");
             }
 
             // ── 2. Initial placement at CropBox centre ──────────────
