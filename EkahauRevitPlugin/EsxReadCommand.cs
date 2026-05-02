@@ -401,9 +401,27 @@ namespace EkahauRevitPlugin
             }
 
             // ── image-* entries ───────────────────────────────────────
+            //   Strip the "image-" prefix AND any common image extension
+            //   (some Ekahau exports include .png in the entry name,
+            //    which would otherwise prevent the imageId-based lookup
+            //    in floorPlans.json from matching).
             foreach (var kv in entries)
             {
-                if (kv.Key.StartsWith("image-", StringComparison.Ordinal))
+                if (!kv.Key.StartsWith("image-", StringComparison.Ordinal)) continue;
+                string key = kv.Key.Substring(6);
+                foreach (var ext in new[] { ".png", ".jpg", ".jpeg", ".bmp" })
+                {
+                    if (key.EndsWith(ext, StringComparison.OrdinalIgnoreCase))
+                    {
+                        key = key.Substring(0, key.Length - ext.Length);
+                        break;
+                    }
+                }
+                // Store both the stripped key (preferred lookup) AND the
+                // full original key (defensive — handles edge cases where
+                // floorPlans.json includes the extension in imageId).
+                result.ImageEntries[key] = kv.Value;
+                if (!result.ImageEntries.ContainsKey(kv.Key.Substring(6)))
                     result.ImageEntries[kv.Key.Substring(6)] = kv.Value;
             }
 
@@ -2024,21 +2042,51 @@ namespace EkahauRevitPlugin
             var created = new List<ElementId>();
 
             // ── 1. Locate the image bytes for this floor plan ──
-            byte[] imgBytes = null;
-            if (!string.IsNullOrEmpty(fp.ImageId))
-                esxData.ImageEntries.TryGetValue(fp.ImageId, out imgBytes);
+            //   Robust lookup — different Ekahau exports use slightly
+            //   different naming for the image entries inside the .esx
+            //   ZIP.  Try in order:
+            //     a) exact match on fp.ImageId
+            //     b) fp.ImageId + common image extensions
+            //     c) fuzzy match (any key starting with fp.ImageId)
+            //     d) single-image fallback (when there's exactly one
+            //        image entry, use it regardless of name)
+            byte[] imgBytes = LookupImageBytes(esxData, fp);
+            Debug.WriteLine(
+                $"[ESX Read] Image lookup for '{fp.Name}': " +
+                $"fp.ImageId='{fp.ImageId}', " +
+                $"matched={(imgBytes != null ? "YES" : "NO")}, " +
+                $"bytes={(imgBytes?.Length ?? 0)}, " +
+                $"available={esxData.ImageEntries.Count} keys=[" +
+                string.Join(", ", esxData.ImageEntries.Keys.Take(5)) + "]");
 
             if (imgBytes == null || imgBytes.Length == 0)
             {
-                // No image data — show a warning and continue without
-                // visual verification (rare; only when the .esx was
-                // exported without floor-plan rasters).
+                // No image data — show a DIAGNOSTIC dialog so the user can
+                // see exactly what was looked up and what's available.
                 progress.Hide();
+                string availableKeys = esxData.ImageEntries.Count > 0
+                    ? "  • " + string.Join("\n  • ",
+                        esxData.ImageEntries.Keys.Take(10))
+                    : "  (zero image entries)";
+                if (esxData.ImageEntries.Count > 10)
+                    availableKeys += $"\n  (… {esxData.ImageEntries.Count - 10} more)";
+
                 TaskDialog.Show("ESX Read — No Image",
-                    $"The .esx file has no floor-plan image for '{fp.Name}'.\n\n" +
+                    $"Could not extract a floor-plan image for '{fp.Name}'.\n\n" +
+                    "DIAGNOSTIC INFO:\n" +
+                    $"  Floor plan name : {fp.Name}\n" +
+                    $"  Floor plan ID   : {fp.Id}\n" +
+                    $"  Looking for image with ID:\n    '{fp.ImageId}'\n" +
+                    $"  Total image entries in .esx : {esxData.ImageEntries.Count}\n\n" +
+                    $"Available image keys in .esx:\n{availableKeys}\n\n" +
+                    "Likely causes:\n" +
+                    "  • The .esx was saved without floor-plan rasters\n" +
+                    "  • The image entry naming differs from 'image-{id}'\n" +
+                    "  • The floorPlans.json imageId doesn't match any image\n\n" +
                     "Visual alignment verification is not available.\n" +
                     "AP markers will be placed using the staged coordinate " +
-                    "transform without an overlay reference.");
+                    "transform without an overlay reference.\n\n" +
+                    "Please screenshot this dialog when reporting the issue.");
                 progress.Show();
                 DoEvents();
                 result.Warning = string.IsNullOrEmpty(result.Warning)
@@ -2190,6 +2238,36 @@ namespace EkahauRevitPlugin
         }
 
         /// <summary>
+        /// Robust lookup of image bytes for a floor plan.  Tries:
+        ///   1. Exact match on fp.ImageId
+        ///   2. fp.ImageId + common image extensions (.png/.jpg/.jpeg/.bmp)
+        ///   3. Fuzzy: any key starting with fp.ImageId
+        ///   4. Single-image fallback (when there's exactly one entry)
+        /// Returns null when no plausible match is found.
+        /// </summary>
+        private static byte[] LookupImageBytes(EsxReadResult esxData, EsxFloorPlanData fp)
+        {
+            if (esxData?.ImageEntries == null) return null;
+
+            byte[] result = null;
+            if (!string.IsNullOrEmpty(fp?.ImageId))
+            {
+                if (esxData.ImageEntries.TryGetValue(fp.ImageId, out result)) return result;
+                foreach (var ext in new[] { ".png", ".jpg", ".jpeg", ".bmp" })
+                {
+                    if (esxData.ImageEntries.TryGetValue(fp.ImageId + ext, out result))
+                        return result;
+                }
+                var fuzzy = esxData.ImageEntries.Keys.FirstOrDefault(k =>
+                    k.StartsWith(fp.ImageId, StringComparison.OrdinalIgnoreCase));
+                if (fuzzy != null) return esxData.ImageEntries[fuzzy];
+            }
+            if (esxData.ImageEntries.Count == 1)
+                return esxData.ImageEntries.First().Value;
+            return null;
+        }
+
+        /// <summary>
         /// Best-effort delete of a list of overlay element IDs in a single
         /// transaction.  Never throws — used by the verification dialog
         /// when the user requests realignment or abort.
@@ -2325,13 +2403,14 @@ namespace EkahauRevitPlugin
             Document doc = view.Document;
 
             // ── 1. Image bytes → temp file ──────────────────────────
-            byte[] imgBytes = null;
-            if (!string.IsNullOrEmpty(fp.ImageId))
-                esxData.ImageEntries.TryGetValue(fp.ImageId, out imgBytes);
+            //   Same robust lookup as PlaceImageAndAskForVerification:
+            //   exact match → +ext → fuzzy → single-image fallback.
+            byte[] imgBytes = LookupImageBytes(esxData, fp);
             if (imgBytes == null || imgBytes.Length < 100)
             {
                 TaskDialog.Show("Visual Alignment",
-                    "The .esx has no usable floor-plan image — visual alignment can't run.");
+                    "The .esx has no usable floor-plan image — visual alignment can't run.\n\n" +
+                    $"Looked up image ID '{fp.ImageId}' in {esxData.ImageEntries.Count} entries.");
                 return null;
             }
 

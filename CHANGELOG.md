@@ -5,6 +5,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.7] — 2026-05-02
+
+### Fixed
+- **Image extraction now uses robust 4-tier matching** (was: exact match only). Different `.esx` exports name image entries differently — some have `image-{uuid}`, some have `image-{uuid}.png`. Previous parser stripped only the `image-` prefix, so an entry called `image-abc-123.png` became key `abc-123.png` and didn't match `floorPlans[].imageId == "abc-123"`. Result: image extraction silently failed → no overlay → no manual alignment → straight to "0 APs placed".
+
+### Added
+- **`LookupImageBytes` helper** with 4-tier matching:
+  1. Exact match on `fp.ImageId`
+  2. `fp.ImageId` + common image extensions (`.png`/`.jpg`/`.jpeg`/`.bmp`)
+  3. Fuzzy: any key starting with `fp.ImageId`
+  4. Single-image fallback (when there's exactly one image entry)
+- **Parser now strips common image extensions** when storing entry keys, AND keeps the original full key as a defensive duplicate. Either lookup direction works.
+- **"No Image" diagnostic dialog now includes**:
+  - Floor plan name + ID
+  - The exact ID being looked up
+  - Total image-entry count in the .esx
+  - Up to 10 available image keys (so you can spot the mismatch immediately)
+  - Likely-cause checklist
+  - "Please screenshot this dialog when reporting the issue"
+- `Debug.WriteLine` of every image lookup attempt (visible in DebugView):
+  ```
+  [ESX Read] Image lookup for 'Level 1': fp.ImageId='abc-123',
+    matched=YES, bytes=524984, available=2 keys=[abc-123, xyz-789]
+  ```
+
 ## [2.5.6] — 2026-05-01
 
 ### Fixed
