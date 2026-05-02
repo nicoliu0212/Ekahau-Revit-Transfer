@@ -5,6 +5,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.10] — 2026-05-02
+
+### Added
+- **WPF/WIC fallback** in `ReadImageDimensions` — if the manual PNG header parse fails AND GDI+ fails, we now try `System.Windows.Media.Imaging.BitmapDecoder.Create` which uses the same WIC engine Revit itself uses. WIC handles JPEG, BMP, TIFF, GIF, WebP, plus exotic PNG variants that both GDI+ and our PNG parser may reject.
+- **Hex dump of the first 16 bytes** in the dimension-failure error dialog — lets you (and us) instantly identify what format Ekahau actually exported, even if it's something unexpected:
+  ```
+  File size : 524,984 bytes
+  First 16 bytes (hex):
+    89504E47 0D0A1A0A 0000000D 49484452
+
+  Common signatures:
+    PNG  = 89 50 4E 47 0D 0A 1A 0A
+    JPEG = FF D8 FF
+    BMP  = 42 4D
+    GIF  = 47 49 46 38
+    TIFF = 49 49 2A 00 (LE) or 4D 4D 00 2A (BE)
+    WebP = 52 49 46 46 ... 57 45 42 50
+  ```
+
+### Why
+v2.5.9's diagnostic dialog showed "Could not determine image dimensions" — meaning both PNG header parse and GDI+ failed. The hex dump will reveal whether the file is actually a non-PNG format (JPEG/WebP/etc.) that we should add explicit support for, or something else entirely (corrupt bytes, JSON metadata, etc.).
+
 ## [2.5.9] — 2026-05-02
 
 ### Fixed

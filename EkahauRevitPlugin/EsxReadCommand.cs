@@ -2272,7 +2272,7 @@ namespace EkahauRevitPlugin
         /// </summary>
         internal static (int Width, int Height) ReadImageDimensions(string path)
         {
-            // ── PNG fast path (manual header parse) ───────────────────
+            // ── 1. PNG fast path (manual header parse, no dependencies) ──
             try
             {
                 byte[] header = new byte[24];
@@ -2299,17 +2299,70 @@ namespace EkahauRevitPlugin
                     }
                 }
             }
+            catch { /* fall through to WIC */ }
+
+            // ── 2. WIC via WPF BitmapDecoder (same engine Revit uses,
+            //   far more permissive than GDI+ — handles JPEG, BMP, TIFF,
+            //   GIF, WebP, plus exotic PNG variants).
+            try
+            {
+                using var fs = File.OpenRead(path);
+                var decoder = System.Windows.Media.Imaging.BitmapDecoder.Create(
+                    fs,
+                    System.Windows.Media.Imaging.BitmapCreateOptions.PreservePixelFormat |
+                    System.Windows.Media.Imaging.BitmapCreateOptions.IgnoreColorProfile,
+                    System.Windows.Media.Imaging.BitmapCacheOption.None);
+                if (decoder.Frames.Count > 0)
+                {
+                    var f = decoder.Frames[0];
+                    if (f.PixelWidth > 0 && f.PixelHeight > 0)
+                        return (f.PixelWidth, f.PixelHeight);
+                }
+            }
             catch { /* fall through to GDI+ */ }
 
-            // ── GDI+ fallback (JPEG/BMP/TIFF/etc) ─────────────────────
+            // ── 3. GDI+ legacy fallback (mostly here for completeness) ──
             try
             {
                 using var img = System.Drawing.Image.FromFile(path);
                 return (img.Width, img.Height);
             }
-            catch { /* both paths failed */ }
+            catch { /* all three paths failed */ }
 
             return (0, 0);
+        }
+
+        /// <summary>
+        /// Dump the first <paramref name="count"/> bytes of a file as a
+        /// hex string for diagnostic purposes (e.g. identifying unknown
+        /// image formats by their magic bytes).  Never throws.
+        /// </summary>
+        internal static string ReadFirstBytesHex(string path, int count = 16)
+        {
+            try
+            {
+                byte[] buf = new byte[count];
+                using var fs = File.OpenRead(path);
+                int read = 0;
+                while (read < count)
+                {
+                    int r = fs.Read(buf, read, count - read);
+                    if (r <= 0) break;
+                    read += r;
+                }
+                if (read == 0) return "(file empty)";
+                var sb = new StringBuilder(read * 3);
+                for (int i = 0; i < read; i++)
+                {
+                    if (i > 0 && i % 4 == 0) sb.Append(' ');
+                    sb.Append(buf[i].ToString("X2"));
+                }
+                return sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                return $"(read failed: {ex.Message})";
+            }
         }
 
         /// <summary>
@@ -2534,16 +2587,29 @@ namespace EkahauRevitPlugin
                     $"Could not write temp image to '{imgPath}': {ex.Message}", ex);
             }
 
-            //   Use the GDI+-free PNG header parser to dodge
-            //   System.Drawing's misleading "Out of memory" errors for
-            //   PNGs it doesn't fully understand (Ekahau's PNGs hit this).
+            //   Tries (in order): manual PNG header parse → WPF/WIC
+            //   BitmapDecoder → GDI+.  All three paths must fail before
+            //   we throw — and we include the file's first 16 bytes in
+            //   the error so the format can be identified at a glance.
             var (imgPxW, imgPxH) = ReadImageDimensions(imgPath);
             if (imgPxW <= 0 || imgPxH <= 0)
             {
+                long fileSize = 0;
+                try { fileSize = new FileInfo(imgPath).Length; } catch { }
+                string hex = ReadFirstBytesHex(imgPath, 16);
                 TryDeleteFile(imgPath);
                 throw new InvalidOperationException(
-                    $"Could not determine image dimensions from '{imgPath}'. " +
-                    "The file may be corrupt or in an unsupported format.");
+                    $"Could not determine image dimensions.\n\n" +
+                    $"File size : {fileSize:N0} bytes\n" +
+                    $"First 16 bytes (hex):\n  {hex}\n\n" +
+                    "Common signatures for reference:\n" +
+                    "  PNG  = 89 50 4E 47 0D 0A 1A 0A\n" +
+                    "  JPEG = FF D8 FF\n" +
+                    "  BMP  = 42 4D\n" +
+                    "  GIF  = 47 49 46 38\n" +
+                    "  TIFF = 49 49 2A 00 (LE) or 4D 4D 00 2A (BE)\n" +
+                    "  WebP = 52 49 46 46 ... 57 45 42 50\n\n" +
+                    "Send this dialog as a screenshot when reporting the issue.");
             }
 
             // ── 2. Initial placement at CropBox centre ──────────────
