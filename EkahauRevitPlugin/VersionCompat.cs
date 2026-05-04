@@ -136,15 +136,37 @@ namespace EkahauRevitPlugin
         /// </summary>
         public static ImageType CreateImageType(Document doc, string imagePath)
         {
+            return CreateImageType(doc, imagePath, out _);
+        }
+
+        /// <summary>
+        /// Create an ImageType from a file path.  Returns null on failure and
+        /// reports the underlying exception (if any) via <paramref name="lastError"/>
+        /// so callers can surface a useful diagnostic instead of a generic
+        /// "returned null" message.  Reflection inner-exceptions are unwrapped.
+        /// </summary>
+        public static ImageType CreateImageType(
+            Document doc, string imagePath, out Exception lastError)
+        {
+            lastError = null;
 #if REVIT_NET8 || REVIT_NET10
             try { return CreateImageTypeWithSource(doc, imagePath); }
-            catch { return null; }
+            catch (Exception ex) { lastError = Unwrap(ex); return null; }
 #else
             // Try the 2024-style 2-arg ImageTypeOptions ctor via reflection,
             // then the 2023-style ImageType.Create(doc, path) via reflection.
-            try { return CreateImageTypeReflection(doc, imagePath); }
-            catch { return null; }
+            try { return CreateImageTypeReflection(doc, imagePath, out lastError); }
+            catch (Exception ex) { lastError = Unwrap(ex); return null; }
 #endif
+        }
+
+        // TargetInvocationException wraps the real error one (or two) levels deep
+        // when we go through reflection — peel it for a readable diagnostic.
+        private static Exception Unwrap(Exception ex)
+        {
+            while (ex is System.Reflection.TargetInvocationException tie && tie.InnerException != null)
+                ex = tie.InnerException;
+            return ex;
         }
 
 #if REVIT_NET8 || REVIT_NET10
@@ -158,8 +180,11 @@ namespace EkahauRevitPlugin
 
 #if REVIT_LEGACY
         [MethodImpl(MethodImplOptions.NoInlining)]
-        private static ImageType CreateImageTypeReflection(Document doc, string imagePath)
+        private static ImageType CreateImageTypeReflection(
+            Document doc, string imagePath, out Exception lastError)
         {
+            lastError = null;
+
             // Try ImageTypeOptions(string, bool) — Revit 2024 runtime
             try
             {
@@ -174,7 +199,7 @@ namespace EkahauRevitPlugin
                         return (ImageType)createMI.Invoke(null, new[] { doc, opts });
                 }
             }
-            catch { }
+            catch (Exception ex) { lastError = Unwrap(ex); }
 
             // Try ImageType.Create(Document, string) — Revit 2023 runtime
             try
@@ -184,7 +209,7 @@ namespace EkahauRevitPlugin
                 if (createMI != null)
                     return (ImageType)createMI.Invoke(null, new object[] { doc, imagePath });
             }
-            catch { }
+            catch (Exception ex) { lastError = Unwrap(ex); }
 
             return null;
         }

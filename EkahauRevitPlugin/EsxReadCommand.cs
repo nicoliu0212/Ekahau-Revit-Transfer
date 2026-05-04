@@ -1285,16 +1285,28 @@ namespace EkahauRevitPlugin
 
             // ── Step 5: Create ImageType ───────────────────────────────
             ImageType imgType = null;
-            try { imgType = VersionCompat.CreateImageType(doc, imagePath); }
+            Exception imgTypeErr = null;
+            try { imgType = VersionCompat.CreateImageType(doc, imagePath, out imgTypeErr); }
             catch (Exception ex)
             {
+                imgTypeErr = ex;
                 Debug.WriteLine($"[ESX Read] ImageType.Create failed: {ex.Message}");
             }
             if (imgType == null)
             {
+                long fileSize = 0;
+                try { fileSize = new FileInfo(imagePath).Length; } catch { }
+                string hex = ReadFirstBytesHex(imagePath, 16);
+                string detail = imgTypeErr != null
+                    ? $"{imgTypeErr.GetType().Name}: {imgTypeErr.Message}"
+                    : "(no inner exception captured)";
+
                 TaskDialog.Show("ESX Read — Image Error",
-                    "Could not create the floor plan ImageType from:\n" +
-                    imagePath + "\n\n" +
+                    "Could not create the floor plan ImageType.\n\n" +
+                    $"Underlying error: {detail}\n\n" +
+                    $"Temp file    : {imagePath}\n" +
+                    $"File size    : {fileSize:N0} bytes\n" +
+                    $"First 16 hex :\n  {hex}\n\n" +
                     "The reference overlay won't be shown for this floor.\n" +
                     "AP markers will still be placed.");
                 return null;
@@ -2680,15 +2692,40 @@ namespace EkahauRevitPlugin
             {
                 using var tx = new Transaction(doc, "Visual Cal — initial image");
                 tx.Start();
-                var imgType = VersionCompat.CreateImageType(doc, imgPath);
+                var imgType = VersionCompat.CreateImageType(doc, imgPath, out var imgTypeErr);
                 if (imgType == null)
                 {
                     tx.RollBack();
+
+                    // Capture diagnostics BEFORE deleting the temp file so the
+                    // user can see exactly what bytes Revit refused.  v2.5.11
+                    // extracted the embedded raster from an SVG; if Revit then
+                    // rejects that raster we need to know what header it has
+                    // (it might be JPEG, WebP, or a malformed PNG).
+                    long fileSize = 0;
+                    try { fileSize = new FileInfo(imgPath).Length; } catch { }
+                    string hex = ReadFirstBytesHex(imgPath, 16);
+
                     TryDeleteFile(imgPath);
+
+                    string detail = imgTypeErr != null
+                        ? $"{imgTypeErr.GetType().Name}: {imgTypeErr.Message}"
+                        : "(no inner exception captured)";
+
                     throw new InvalidOperationException(
-                        "VersionCompat.CreateImageType returned null. " +
-                        "Check that the temp PNG file is valid and that the " +
-                        "Revit API supports ImageType.Create on this version.");
+                        "VersionCompat.CreateImageType returned null.\n\n" +
+                        $"Underlying error: {detail}\n\n" +
+                        $"Temp file    : {imgPath}\n" +
+                        $"File size    : {fileSize:N0} bytes\n" +
+                        $"First 16 hex :\n  {hex}\n\n" +
+                        "Common signatures:\n" +
+                        "  PNG  = 89 50 4E 47 0D 0A 1A 0A\n" +
+                        "  JPEG = FF D8 FF\n" +
+                        "  BMP  = 42 4D\n" +
+                        "  GIF  = 47 49 46 38\n" +
+                        "  TIFF = 49 49 2A 00 (LE) or 4D 4D 00 2A (BE)\n" +
+                        "  WebP = 52 49 46 46 ... 57 45 42 50\n\n" +
+                        "Send this dialog as a screenshot when reporting the issue.");
                 }
                 var opts = new ImagePlacementOptions(
                     new XYZ(initCenterX, initCenterY, zElev), BoxPlacement.Center);

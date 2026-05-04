@@ -5,6 +5,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.12] — 2026-05-02
+
+### Fixed
+- **`VersionCompat.CreateImageType` no longer swallows the underlying exception** — was returning bare `null` on every failure path, which left the user with the unhelpful "VersionCompat.CreateImageType returned null. Check that the temp PNG file is valid…" message. The new overload (`CreateImageType(doc, path, out Exception lastError)`) propagates the real reason (e.g., `FileNotFoundException`, `Autodesk.Revit.Exceptions.ArgumentException`, `OutOfMemoryException`, etc.) so the caller can show it to the user.
+- Reflection-wrapped `TargetInvocationException`s are unwrapped to the real inner exception before being reported, so the user sees `ArgumentException: Image format not supported` instead of `TargetInvocationException: Exception has been thrown by the target of an invocation`.
+
+### Added
+- Both image-creation entry points (`PlaceImageAndAskForVerification` step 5 + `OfferVisualAlignmentCoreImpl` initial-image transaction) now show, on failure:
+  - The underlying exception type + message
+  - The temp file path
+  - The file size in bytes
+  - The first 16 bytes in hex (with the same PNG/JPEG/BMP/GIF/TIFF/WebP signature reference table as v2.5.10's dimension-probe diagnostic)
+
+### Why
+v2.5.11 successfully extracted the embedded raster from SVG-wrapped `.esx` floor plans, but the user's next dialog was `"VersionCompat.CreateImageType returned null"` with no explanation of why Revit refused the extracted raster. The new diagnostic surfaces both the exception and the file's actual header bytes, so the next iteration can target the real root cause (whether the embedded raster has a valid PNG/JPEG header, whether Revit's WIC engine rejected it, or whether something else in the placement transaction failed).
+
 ## [2.5.11] — 2026-05-02
 
 ### Fixed
