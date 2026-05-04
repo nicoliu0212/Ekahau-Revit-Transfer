@@ -5,6 +5,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.17] — 2026-05-04
+
+### Fixed
+- **`ImageType.Create` still returned NULL on the v2.5.16-encoded PNG** — diagnostic showed a perfectly valid PNG (header `89 50 4E 47 0D 0A 1A 0A …`) at 5.5 MB, but Revit's import path silently rejected it. Two likely causes addressed in this release.
+
+### Changed
+- **`NormalizeForRevit` now produces 24-bit RGB PNGs (no alpha)** instead of 32-bit RGBA. Revit's `ImageType.Create` import path is known to silently return NULL for 32-bit RGBA PNGs on certain versions; 24-bit RGB is the most universally accepted variant. Pixel format conversion is `Bgra32` → `Bgr24` via `FormatConvertedBitmap` before encoding.
+- **`VersionCompat.CreateImageType` now tries multiple strategies in sequence** until one succeeds:
+  1. `ImageTypeSource.Import` + 3-arg ctor — embeds the raster into the .rvt (existing behaviour, kept first because it works in the common case).
+  2. `ImageTypeSource.Link` + 3-arg ctor — keeps the file as an external link rather than embedding it. Much more permissive in Revit's internal validation; works for some files that Import silently rejects.
+  3. (REVIT_LEGACY only) 2-arg ctor `ImageTypeOptions(string, bool)` — Revit 2024 fallback.
+  4. (REVIT_LEGACY only) 1-arg `ImageType.Create(Document, string)` — Revit 2023 fallback.
+
+### Added
+- New `out string strategyTrace` parameter on `VersionCompat.CreateImageType` that captures the result of every attempted strategy:
+  ```
+  Strategies tried:
+    Import: null
+    Link  : OK
+  ```
+  When all strategies fail, the diagnostic dialog now shows exactly which approaches were tried and what each one returned/threw — so the next iteration has zero ambiguity about what worked vs. didn't.
+- The 2-out and 1-out overloads are kept so existing call sites compile unchanged.
+
+### Why this is a focused, multi-pronged fix
+The Revit API forum has multiple threads where users hit "ImageType.Create returns null" specifically for files that should work — the resolutions vary (drop alpha, use Link instead of Import, downscale, switch ctor). Rather than guess which one applies here, v2.5.17 tries each in turn and reports the result. Worst case: we get a definitive trace showing every approach Revit refused, which narrows the diagnosis to "this is an environment/document-specific issue, not a file-format issue".
+
 ## [2.5.16] — 2026-05-04
 
 ### Fixed

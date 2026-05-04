@@ -136,28 +136,87 @@ namespace EkahauRevitPlugin
         /// </summary>
         public static ImageType CreateImageType(Document doc, string imagePath)
         {
-            return CreateImageType(doc, imagePath, out _);
+            return CreateImageType(doc, imagePath, out _, out _);
         }
 
         /// <summary>
         /// Create an ImageType from a file path.  Returns null on failure and
         /// reports the underlying exception (if any) via <paramref name="lastError"/>
-        /// so callers can surface a useful diagnostic instead of a generic
-        /// "returned null" message.  Reflection inner-exceptions are unwrapped.
+        /// plus a "strategies tried" trace via <paramref name="strategyTrace"/>
+        /// so the diagnostic dialog can show exactly which approaches were
+        /// attempted and why each one returned null.  Reflection inner-
+        /// exceptions are unwrapped.
+        ///
+        /// Tries multiple strategies in order until one succeeds:
+        ///   1. Import + 3-arg ctor — embeds the raster into the .rvt
+        ///   2. Link   + 3-arg ctor — keeps the file as an external link
+        ///                            (much more permissive in Revit's
+        ///                            internal validation; works for some
+        ///                            files that Import silently rejects)
+        /// On REVIT_LEGACY (net48), also falls back to the 2-arg ctor and
+        /// the 2023-era Create(doc, path) overload via reflection.
+        /// </summary>
+        public static ImageType CreateImageType(
+            Document doc, string imagePath, out Exception lastError, out string strategyTrace)
+        {
+            lastError = null;
+            var trace = new System.Text.StringBuilder();
+#if REVIT_NET8 || REVIT_NET10
+            try
+            {
+                var t = CreateImageTypeWithSource(doc, imagePath, ImageTypeSource.Import);
+                trace.Append("Import: ").AppendLine(t != null ? "OK" : "null");
+                if (t != null) { strategyTrace = trace.ToString(); return t; }
+            }
+            catch (Exception ex)
+            {
+                lastError = Unwrap(ex);
+                trace.Append("Import: threw ").Append(lastError.GetType().Name)
+                     .Append(": ").AppendLine(lastError.Message);
+            }
+
+            try
+            {
+                var t = CreateImageTypeWithSource(doc, imagePath, ImageTypeSource.Link);
+                trace.Append("Link  : ").AppendLine(t != null ? "OK" : "null");
+                if (t != null) { strategyTrace = trace.ToString(); return t; }
+            }
+            catch (Exception ex)
+            {
+                lastError = Unwrap(ex);
+                trace.Append("Link  : threw ").Append(lastError.GetType().Name)
+                     .Append(": ").AppendLine(lastError.Message);
+            }
+
+            strategyTrace = trace.ToString();
+            return null;
+#else
+            try
+            {
+                var t = CreateImageTypeReflection(doc, imagePath, out lastError, trace);
+                strategyTrace = trace.ToString();
+                return t;
+            }
+            catch (Exception ex)
+            {
+                lastError = Unwrap(ex);
+                trace.Append("Reflection wrapper threw ")
+                     .Append(lastError.GetType().Name).Append(": ")
+                     .AppendLine(lastError.Message);
+                strategyTrace = trace.ToString();
+                return null;
+            }
+#endif
+        }
+
+        /// <summary>
+        /// 2-out-param overload that fills <paramref name="lastError"/> only.
+        /// Kept for callers that don't want the strategy trace.
         /// </summary>
         public static ImageType CreateImageType(
             Document doc, string imagePath, out Exception lastError)
         {
-            lastError = null;
-#if REVIT_NET8 || REVIT_NET10
-            try { return CreateImageTypeWithSource(doc, imagePath); }
-            catch (Exception ex) { lastError = Unwrap(ex); return null; }
-#else
-            // Try the 2024-style 2-arg ImageTypeOptions ctor via reflection,
-            // then the 2023-style ImageType.Create(doc, path) via reflection.
-            try { return CreateImageTypeReflection(doc, imagePath, out lastError); }
-            catch (Exception ex) { lastError = Unwrap(ex); return null; }
-#endif
+            return CreateImageType(doc, imagePath, out lastError, out _);
         }
 
         // TargetInvocationException wraps the real error one (or two) levels deep
@@ -171,9 +230,10 @@ namespace EkahauRevitPlugin
 
 #if REVIT_NET8 || REVIT_NET10
         [MethodImpl(MethodImplOptions.NoInlining)]
-        private static ImageType CreateImageTypeWithSource(Document doc, string imagePath)
+        private static ImageType CreateImageTypeWithSource(
+            Document doc, string imagePath, ImageTypeSource source)
         {
-            var opts = new ImageTypeOptions(imagePath, false, ImageTypeSource.Import);
+            var opts = new ImageTypeOptions(imagePath, false, source);
             return ImageType.Create(doc, opts);
         }
 #endif
@@ -181,9 +241,54 @@ namespace EkahauRevitPlugin
 #if REVIT_LEGACY
         [MethodImpl(MethodImplOptions.NoInlining)]
         private static ImageType CreateImageTypeReflection(
-            Document doc, string imagePath, out Exception lastError)
+            Document doc, string imagePath,
+            out Exception lastError, System.Text.StringBuilder trace)
         {
             lastError = null;
+
+            // Try ImageTypeOptions(string, bool, ImageTypeSource) — Import
+            // then Link.  The 3-arg ctor exists from Revit 2024 onwards.
+            try
+            {
+                var optsType = typeof(ImageTypeOptions);
+                var srcType  = optsType.Assembly.GetType("Autodesk.Revit.DB.ImageTypeSource");
+                var ctor3 = srcType != null
+                    ? optsType.GetConstructor(new[] { typeof(string), typeof(bool), srcType })
+                    : null;
+                if (ctor3 != null && srcType != null)
+                {
+                    var importVal = Enum.Parse(srcType, "Import");
+                    var linkVal   = Enum.Parse(srcType, "Link");
+                    var createMI  = typeof(ImageType).GetMethod(
+                        "Create", new[] { typeof(Document), optsType });
+
+                    foreach (var (name, val) in new[] {
+                        ("Import", importVal), ("Link", linkVal) })
+                    {
+                        try
+                        {
+                            var opts = ctor3.Invoke(new[] { (object)imagePath, false, val });
+                            var t = (ImageType)createMI.Invoke(null, new[] { doc, opts });
+                            trace.Append(name).Append(" (3-arg) : ")
+                                 .AppendLine(t != null ? "OK" : "null");
+                            if (t != null) return t;
+                        }
+                        catch (Exception ex)
+                        {
+                            lastError = Unwrap(ex);
+                            trace.Append(name).Append(" (3-arg) : threw ")
+                                 .Append(lastError.GetType().Name).Append(": ")
+                                 .AppendLine(lastError.Message);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                lastError = Unwrap(ex);
+                trace.Append("3-arg lookup threw ").Append(lastError.GetType().Name)
+                     .Append(": ").AppendLine(lastError.Message);
+            }
 
             // Try ImageTypeOptions(string, bool) — Revit 2024 runtime
             try
@@ -196,10 +301,19 @@ namespace EkahauRevitPlugin
                     var createMI = typeof(ImageType).GetMethod(
                         "Create", new[] { typeof(Document), optsType });
                     if (createMI != null)
-                        return (ImageType)createMI.Invoke(null, new[] { doc, opts });
+                    {
+                        var t = (ImageType)createMI.Invoke(null, new[] { doc, opts });
+                        trace.Append("2-arg ctor  : ").AppendLine(t != null ? "OK" : "null");
+                        if (t != null) return t;
+                    }
                 }
             }
-            catch (Exception ex) { lastError = Unwrap(ex); }
+            catch (Exception ex)
+            {
+                lastError = Unwrap(ex);
+                trace.Append("2-arg ctor  : threw ").Append(lastError.GetType().Name)
+                     .Append(": ").AppendLine(lastError.Message);
+            }
 
             // Try ImageType.Create(Document, string) — Revit 2023 runtime
             try
@@ -207,9 +321,18 @@ namespace EkahauRevitPlugin
                 var createMI = typeof(ImageType).GetMethod(
                     "Create", new[] { typeof(Document), typeof(string) });
                 if (createMI != null)
-                    return (ImageType)createMI.Invoke(null, new object[] { doc, imagePath });
+                {
+                    var t = (ImageType)createMI.Invoke(null, new object[] { doc, imagePath });
+                    trace.Append("1-arg path  : ").AppendLine(t != null ? "OK" : "null");
+                    if (t != null) return t;
+                }
             }
-            catch (Exception ex) { lastError = Unwrap(ex); }
+            catch (Exception ex)
+            {
+                lastError = Unwrap(ex);
+                trace.Append("1-arg path  : threw ").Append(lastError.GetType().Name)
+                     .Append(": ").AppendLine(lastError.Message);
+            }
 
             return null;
         }

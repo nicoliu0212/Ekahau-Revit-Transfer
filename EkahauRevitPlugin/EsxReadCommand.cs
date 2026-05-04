@@ -1299,7 +1299,8 @@ namespace EkahauRevitPlugin
             // ── Step 5: Create ImageType ───────────────────────────────
             ImageType imgType = null;
             Exception imgTypeErr = null;
-            try { imgType = VersionCompat.CreateImageType(doc, imagePath, out imgTypeErr); }
+            string strategyTrace = "";
+            try { imgType = VersionCompat.CreateImageType(doc, imagePath, out imgTypeErr, out strategyTrace); }
             catch (Exception ex)
             {
                 imgTypeErr = ex;
@@ -1317,8 +1318,10 @@ namespace EkahauRevitPlugin
                     : "(no inner exception captured)";
 
                 TaskDialog.Show("ESX Read — Image Error",
-                    "Could not create the floor plan ImageType.\n\n" +
-                    $"Underlying error: {detail}\n\n" +
+                    "Could not create the floor plan ImageType after trying " +
+                    "every fallback strategy.\n\n" +
+                    $"Strategies tried:\n{strategyTrace}\n" +
+                    $"Last error   : {detail}\n\n" +
                     $"Temp file    : {imagePath}\n" +
                     $"File size    : {fileSize:N0} bytes\n" +
                     $"First 16 hex :\n  {hex}\n\n" +
@@ -2797,16 +2800,14 @@ namespace EkahauRevitPlugin
             {
                 using var tx = new Transaction(doc, "Visual Cal — initial image");
                 tx.Start();
-                var imgType = VersionCompat.CreateImageType(doc, imgPath, out var imgTypeErr);
+                var imgType = VersionCompat.CreateImageType(
+                    doc, imgPath, out var imgTypeErr, out var strategyTrace);
                 if (imgType == null)
                 {
                     tx.RollBack();
 
-                    // Capture diagnostics BEFORE deleting the temp file so the
-                    // user can see exactly what bytes Revit refused.  v2.5.11
-                    // extracted the embedded raster from an SVG; if Revit then
-                    // rejects that raster we need to know what header it has
-                    // (it might be JPEG, WebP, or a malformed PNG).
+                    // Capture diagnostics BEFORE deleting the temp file so
+                    // the user can see exactly what bytes Revit refused.
                     long fileSize = 0;
                     try { fileSize = new FileInfo(imgPath).Length; } catch { }
                     string hex = ReadFirstBytesHex(imgPath, 16);
@@ -2818,8 +2819,10 @@ namespace EkahauRevitPlugin
                         : "(no inner exception captured)";
 
                     throw new InvalidOperationException(
-                        "VersionCompat.CreateImageType returned null.\n\n" +
-                        $"Underlying error: {detail}\n\n" +
+                        "VersionCompat.CreateImageType returned null after " +
+                        "trying every fallback strategy.\n\n" +
+                        $"Strategies tried:\n{strategyTrace}\n" +
+                        $"Last error   : {detail}\n\n" +
                         $"Temp file    : {imgPath}\n" +
                         $"File size    : {fileSize:N0} bytes\n" +
                         $"First 16 hex :\n  {hex}\n\n" +

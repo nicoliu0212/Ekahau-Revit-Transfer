@@ -245,11 +245,15 @@ namespace EkahauRevitPlugin
                 int origW = src.PixelWidth;
                 int origH = src.PixelHeight;
 
-                // Force Bgra32 — strips ICC profiles + neutralises any
-                // odd source pixel format that Revit's import path
-                // rejects.
-                if (src.Format != PixelFormats.Bgra32)
-                    src = new FormatConvertedBitmap(src, PixelFormats.Bgra32, null, 0);
+                // Force Bgr24 (8-bit RGB, no alpha) — strips ICC
+                // profiles + neutralises any odd source pixel format,
+                // and crucially DROPS the alpha channel.  Revit's
+                // ImageType.Create import path is known to silently
+                // return NULL for 32-bit RGBA PNGs on some versions
+                // (v2.5.16's Bgra32-encoded PNG hit exactly this);
+                // 24-bit RGB is the most universally accepted variant.
+                if (src.Format != PixelFormats.Bgr24)
+                    src = new FormatConvertedBitmap(src, PixelFormats.Bgr24, null, 0);
 
                 // Optional downscale.  Preserves aspect ratio.
                 double scale = 1.0;
