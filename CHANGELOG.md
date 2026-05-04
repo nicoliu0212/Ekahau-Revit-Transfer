@@ -5,6 +5,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.14] — 2026-05-02
+
+### Fixed
+- **CI build broken since v2.5.12** (no MSI was published for v2.5.12 or v2.5.13). Two compile errors I introduced when adding the diagnostic surface in v2.5.12:
+  - `EsxMarkerOps.PlaceFloorPlanImage` called `ReadFirstBytesHex(...)` unqualified, but that helper lives on `EsxReadCommand` (different class) → `error CS0103: The name 'ReadFirstBytesHex' does not exist in the current context`. Fixed by qualifying the call (same pattern as the existing `EsxReadCommand.ReadImageDimensions(...)` call earlier in the same method).
+  - The new `long fileSize = 0;` shadowed an existing `long fileSize` declared earlier in `PlaceFloorPlanImage` → `error CS0136: A local or parameter named 'fileSize' cannot be declared in this scope...`. Fixed by reusing the outer variable instead of redeclaring.
+- The same diagnostic block in `OfferVisualAlignmentCoreImpl` was already in a fresh scope, so it compiled fine on its own — the breakage was specific to the second call site I added.
+
+### Why no v2.5.12 / v2.5.13 MSI exists
+GitHub Actions reported these runs as failed (build step took only ~11 seconds — too fast to actually compile), but a stale render of the Actions page made it look successful. Confirmed via the API:
+```
+v2.5.13 → conclusion: failure  (run 25304947681)
+v2.5.12 → conclusion: failure  (run 25304649231)
+v2.5.11 → conclusion: success  (run 25246405107)  ← last working release
+```
+v2.5.14 ships the v2.5.12 + v2.5.13 changes plus the compile fix, so installing v2.5.14 gives you all of: SVG raster extraction (v2.5.11), real ImageType.Create error surfacing (v2.5.12), and the `bitmapImageId` raster-companion lookup (v2.5.13) that targets your specific .esx file.
+
 ## [2.5.13] — 2026-05-02
 
 ### Fixed

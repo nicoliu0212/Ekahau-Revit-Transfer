@@ -1307,9 +1307,11 @@ namespace EkahauRevitPlugin
             }
             if (imgType == null)
             {
-                long fileSize = 0;
-                try { fileSize = new FileInfo(imagePath).Length; } catch { }
-                string hex = ReadFirstBytesHex(imagePath, 16);
+                // `fileSize` is already declared earlier in this method
+                // (the dimension-probe block); reuse it instead of
+                // shadowing.  ReadFirstBytesHex lives on EsxReadCommand,
+                // so we qualify the call from EsxMarkerOps.
+                string hex = EsxReadCommand.ReadFirstBytesHex(imagePath, 16);
                 string detail = imgTypeErr != null
                     ? $"{imgTypeErr.GetType().Name}: {imgTypeErr.Message}"
                     : "(no inner exception captured)";
