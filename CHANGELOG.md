@@ -5,6 +5,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.13] — 2026-05-02
+
+### Fixed
+- **Use Ekahau's pre-rendered raster companion for SVG floor plans** — when a floor plan's primary `imageId` points at an SVG image entry, Ekahau also ships a JPEG/PNG raster identified by `bitmapImageId` in the same `floorPlans.json` record. The plugin was ignoring `bitmapImageId` and trying to feed the 102 MB SVG to Revit's WIC engine, which doesn't render SVG. Now we read `bitmapImageId` and prefer it whenever it's present, so Revit gets a directly-renderable JPEG/PNG without any SVG decoding required.
+
+### Why this is the real root-cause fix
+- v2.5.11 added an SVG normaliser that extracts the embedded base64 raster from the SVG document. That works for `.esx` files where Ekahau wraps the raster inside the SVG, but the user's actual file (`Related Digital Michigan 20251119.0_QC Review 1.esx`) has the raster as a *separate* entry referenced by `bitmapImageId` — not embedded inside the SVG. Direct inspection of the .esx confirmed:
+  - `image-7f9053c8-…` = 102 MB SVG (the primary `imageId`)
+  - `image-beeceb21-…` = 1.8 MB JPEG (`bitmapImageId`, header `FF D8 FF E0` = JFIF, 5000×3571 px)
+  - `images.json` flags them with `imageFormat: "SVG"` and `imageFormat: "JPEG"` respectively.
+- The SVG normaliser from v2.5.11 stays as a fallback — handles the *other* common Ekahau export pattern where the raster IS embedded in the SVG.
+
+### Added
+- `EsxFloorPlanData.BitmapImageId` — parsed from `floorPlans[].bitmapImageId` in `floorPlans.json`.
+- `TryLookupOne(esxData, id, out result)` helper — factors out the exact / +ext / fuzzy lookup logic so both `BitmapImageId` and `ImageId` use it.
+- `LookupImageBytes` debug log shows when the bitmap companion was used (e.g. `Using bitmapImageId='beeceb21-…' (1,816,148 bytes) instead of imageId='7f9053c8-…' (SVG → raster companion)`).
+
+### Changed
+- The "save floor plan images to staging" step (REQ 21) now also uses `LookupImageBytes` so downstream tools see the JPEG raster, not the SVG.
+
 ## [2.5.12] — 2026-05-02
 
 ### Fixed

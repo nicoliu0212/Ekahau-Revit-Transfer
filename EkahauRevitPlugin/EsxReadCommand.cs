@@ -30,6 +30,15 @@ namespace EkahauRevitPlugin
         public double Height { get; set; }
         public double MetersPerUnit { get; set; }
         public string ImageId { get; set; } = "";
+        /// <summary>
+        /// Optional rasterised companion of <see cref="ImageId"/>.  Ekahau
+        /// stores SVG floor plans with a parallel JPEG/PNG raster that
+        /// renderers can use directly — when present, this is the
+        /// raster's image-entry id (without the "image-" prefix).  We
+        /// prefer this over <see cref="ImageId"/> in the placement path
+        /// because Revit's WIC engine can't render SVG.
+        /// </summary>
+        public string BitmapImageId { get; set; } = "";
         public EsxRevitAnchorData RevitAnchor { get; set; }
     }
 
@@ -320,6 +329,10 @@ namespace EkahauRevitPlugin
                                 Height        = GetDbl(fp, "height"),
                                 MetersPerUnit = GetDbl(fp, "metersPerUnit", 0.0264583),
                                 ImageId       = GetStr(fp, "imageId"),
+                                // Ekahau attaches a rendered raster
+                                // alongside SVG floor plans — prefer it
+                                // when present (Revit can't render SVG).
+                                BitmapImageId = GetStr(fp, "bitmapImageId"),
                             };
                             if (fp.TryGetProperty("revitAnchor", out var anchor))
                                 plan.RevitAnchor = ParseRevitAnchor(anchor);
@@ -1976,12 +1989,15 @@ namespace EkahauRevitPlugin
             catch { /* non-critical */ }
 
             // ── 9. Save floor plan images to staging (REQ 21) ─────────
+            //   Use the same lookup as the placement path so we save the
+            //   raster companion (when present) instead of the SVG that
+            //   downstream tools wouldn't be able to render either.
             try
             {
                 foreach (var fp in selectedFloorPlans)
                 {
-                    if (!string.IsNullOrEmpty(fp.ImageId) &&
-                        esxData.ImageEntries.TryGetValue(fp.ImageId, out var imgBytes))
+                    var imgBytes = LookupImageBytes(esxData, fp);
+                    if (imgBytes != null && imgBytes.Length > 0)
                     {
                         string safe = SanitizeFileName(fp.Name);
                         string imgPath = Path.Combine(stagingDir, $"floor_{safe}.png");
@@ -2402,11 +2418,21 @@ namespace EkahauRevitPlugin
         }
 
         /// <summary>
-        /// Robust lookup of image bytes for a floor plan.  Tries:
-        ///   1. Exact match on fp.ImageId
-        ///   2. fp.ImageId + common image extensions (.png/.jpg/.jpeg/.bmp)
-        ///   3. Fuzzy: any key starting with fp.ImageId
-        ///   4. Single-image fallback (when there's exactly one entry)
+        /// Robust lookup of image bytes for a floor plan.
+        ///
+        /// Order of preference:
+        ///   0. fp.BitmapImageId  — Ekahau's pre-rendered raster companion
+        ///                          for SVG floor plans.  When the primary
+        ///                          `imageId` points at SVG, Ekahau also
+        ///                          ships a JPEG/PNG raster identified by
+        ///                          `bitmapImageId`; Revit's WIC engine
+        ///                          can render that directly, so we try
+        ///                          it FIRST and skip the SVG entirely.
+        ///   1. fp.ImageId        — exact match
+        ///   2. fp.ImageId + ext  — common image extensions
+        ///   3. fuzzy             — any key starting with the id
+        ///   4. single-image fallback (when exactly one entry exists)
+        ///
         /// Returns null when no plausible match is found.
         /// </summary>
         private static byte[] LookupImageBytes(EsxReadResult esxData, EsxFloorPlanData fp)
@@ -2414,21 +2440,59 @@ namespace EkahauRevitPlugin
             if (esxData?.ImageEntries == null) return null;
 
             byte[] result = null;
-            if (!string.IsNullOrEmpty(fp?.ImageId))
+
+            // 0. Prefer the rasterised companion when present.
+            if (!string.IsNullOrEmpty(fp?.BitmapImageId))
             {
-                if (esxData.ImageEntries.TryGetValue(fp.ImageId, out result)) return result;
-                foreach (var ext in new[] { ".png", ".jpg", ".jpeg", ".bmp" })
+                if (TryLookupOne(esxData, fp.BitmapImageId, out result))
                 {
-                    if (esxData.ImageEntries.TryGetValue(fp.ImageId + ext, out result))
-                        return result;
+                    Debug.WriteLine(
+                        $"[ESX Read] Using bitmapImageId='{fp.BitmapImageId}' " +
+                        $"({result.Length:N0} bytes) instead of imageId='{fp.ImageId}' " +
+                        "(SVG → raster companion).");
+                    return result;
                 }
-                var fuzzy = esxData.ImageEntries.Keys.FirstOrDefault(k =>
-                    k.StartsWith(fp.ImageId, StringComparison.OrdinalIgnoreCase));
-                if (fuzzy != null) return esxData.ImageEntries[fuzzy];
+                Debug.WriteLine(
+                    $"[ESX Read] bitmapImageId='{fp.BitmapImageId}' present but no " +
+                    "matching entry — falling back to imageId.");
             }
+
+            // 1-3. Same logic as before, but factored into a helper so the
+            //      bitmap path above stays small and readable.
+            if (!string.IsNullOrEmpty(fp?.ImageId) &&
+                TryLookupOne(esxData, fp.ImageId, out result))
+                return result;
+
+            // 4. Single-image fallback.
             if (esxData.ImageEntries.Count == 1)
                 return esxData.ImageEntries.First().Value;
+
             return null;
+        }
+
+        /// <summary>
+        /// Tier 1-3 lookup for a single id (exact / +ext / fuzzy).
+        /// Used by <see cref="LookupImageBytes"/> for both ImageId and
+        /// BitmapImageId.
+        /// </summary>
+        private static bool TryLookupOne(
+            EsxReadResult esxData, string id, out byte[] result)
+        {
+            if (esxData.ImageEntries.TryGetValue(id, out result)) return true;
+            foreach (var ext in new[] { ".png", ".jpg", ".jpeg", ".bmp" })
+            {
+                if (esxData.ImageEntries.TryGetValue(id + ext, out result))
+                    return true;
+            }
+            var fuzzy = esxData.ImageEntries.Keys.FirstOrDefault(k =>
+                k.StartsWith(id, StringComparison.OrdinalIgnoreCase));
+            if (fuzzy != null)
+            {
+                result = esxData.ImageEntries[fuzzy];
+                return true;
+            }
+            result = null;
+            return false;
         }
 
         /// <summary>
