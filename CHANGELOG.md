@@ -5,6 +5,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.15] — 2026-05-04
+
+### Fixed
+- **`ImageType.Create` returned null because the temp file extension didn't match its actual content** — v2.5.14's diagnostic dialog made this visible:
+  ```
+  Temp file : EkahauVisCal_44c5228…b2e338f65.png
+  First 16 hex : FFD8FFE0 00104A46 49460001 02000001
+                  ^^^^^^^^                              ← JPEG/JFIF
+  Underlying error: (no inner exception captured)
+  ```
+  We were writing the JPEG bytes from `bitmapImageId` (v2.5.13) into a `.png`-named temp file, then handing that path to Revit. Revit's `ImageType.Create` looks at the file extension to choose its WIC decoder; with `.png` it tries the PNG decoder, gets garbage, returns NULL **without throwing** — exactly matching the user's symptom.
+
+### Added
+- `ImageNormalizer.DetectExtension(byte[])` — sniffs PNG / JPEG / BMP / GIF / TIFF (LE+BE) / WebP magic bytes and returns the matching extension (`.png`, `.jpg`, `.bmp`, `.gif`, `.tif`, `.webp`). Falls back to `.png` only when nothing matches.
+- All three image-write sites now pick the extension dynamically:
+  - `OfferVisualAlignmentCoreImpl` → `EkahauVisCal_<guid><ext>`
+  - `PlaceImageAndAskForVerification` → `EkahauRead_<guid><ext>`
+  - Staging save (REQ 21) → `floor_<name><ext>`
+- Each write also logs the chosen path + extension via `Debug.WriteLine` for DebugView traceability.
+
+### Why this is the right fix
+Revit's WIC dispatch is extension-driven and silent on mismatch. Previously we forced `.png` for every write because Ekahau exports were historically PNG; the `bitmapImageId` raster companion is JPEG, so the same path stopped working the moment v2.5.13 routed through it. Detecting the format from magic bytes (rather than trusting `images.json`'s `imageFormat` field, which we'd also have to thread through) keeps the fix narrow and correct for future formats too.
+
 ## [2.5.14] — 2026-05-02
 
 ### Fixed

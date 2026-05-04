@@ -2002,7 +2002,10 @@ namespace EkahauRevitPlugin
                     if (imgBytes != null && imgBytes.Length > 0)
                     {
                         string safe = SanitizeFileName(fp.Name);
-                        string imgPath = Path.Combine(stagingDir, $"floor_{safe}.png");
+                        // Match staging-file extension to the actual raster
+                        // format so downstream tools dispatch correctly too.
+                        string ext = ImageNormalizer.DetectExtension(imgBytes);
+                        string imgPath = Path.Combine(stagingDir, $"floor_{safe}{ext}");
                         File.WriteAllBytes(imgPath, imgBytes);
                     }
                 }
@@ -2144,9 +2147,14 @@ namespace EkahauRevitPlugin
                 Debug.WriteLine($"[ESX Read] SVG detected, embedded raster extracted ({imgBytes.Length:N0} bytes).");
 
             // ── 2. Write image to a temp file (ImageType.Create takes a path) ──
+            //   Match the file extension to the actual raster format —
+            //   Revit's WIC dispatch is extension-driven, so JPEG bytes
+            //   in a .png-named file return null with no exception.
+            string ext = ImageNormalizer.DetectExtension(imgBytes);
             string imgPath = Path.Combine(
                 Path.GetTempPath(),
-                $"EkahauRead_{Guid.NewGuid():N}.png");
+                $"EkahauRead_{Guid.NewGuid():N}{ext}");
+            Debug.WriteLine($"[ESX Read] Temp image: {imgPath} ({imgBytes.Length:N0} bytes, ext={ext})");
             try
             {
                 File.WriteAllBytes(imgPath, imgBytes);
@@ -2696,9 +2704,16 @@ namespace EkahauRevitPlugin
             if (norm.WasSvg)
                 Debug.WriteLine($"[ESX Read] SVG detected, embedded raster extracted ({imgBytes.Length:N0} bytes).");
 
+            // Pick the temp-file extension to match the actual raster
+            // format — Revit's ImageType.Create dispatches its WIC decoder
+            // by extension, so a JPEG inside a .png-named file silently
+            // returns null (the v2.5.14 symptom for SVG-companion exports
+            // where bitmapImageId points at JPEG bytes).
+            string ext = ImageNormalizer.DetectExtension(imgBytes);
             string imgPath = Path.Combine(
                 Path.GetTempPath(),
-                $"EkahauVisCal_{Guid.NewGuid():N}.png");
+                $"EkahauVisCal_{Guid.NewGuid():N}{ext}");
+            Debug.WriteLine($"[ESX Read] Temp image: {imgPath} ({imgBytes.Length:N0} bytes, ext={ext})");
             try { File.WriteAllBytes(imgPath, imgBytes); }
             catch (Exception ex)
             {
