@@ -5,6 +5,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.16] — 2026-05-04
+
+### Fixed
+- **`ImageType.Create` silently rejects "valid" JPEGs from certain sources** — Autodesk-confirmed Revit API behaviour: *"JPEG response data from certain sources may not be readable in the Revit API environment, while PNG or BMP has no issue with the same code"* ([forum thread](https://forums.autodesk.com/t5/revit-api-forum/quot-imagetype-create-quot-method-causes-unexpected-internal/td-p/10263771)). v2.5.15 correctly wrote `EkahauVisCal_*.jpg` (extension matched the JPEG content), but Revit's import path STILL refused it — `ImageType.Create` returned NULL with no exception (`Underlying error: (no inner exception captured)`). The Ekahau JPEG is a perfectly vanilla baseline 8-bit RGB JFIF — `file` reports it as standard — but Revit's WIC import dispatch refuses it anyway.
+
+### Added
+- `ImageNormalizer.NormalizeForRevit(byte[], out string detail, int maxDim = 4000)` — round-trips the raster through the same `BitmapDecoder` + `PngBitmapEncoder` (WIC) that Revit uses internally:
+  1. Decodes via `BitmapDecoder.Create(BitmapCacheOption.OnLoad)` so the source stream can be released immediately.
+  2. Forces `PixelFormats.Bgra32` to strip ICC profiles and neutralise odd source pixel formats.
+  3. Optionally downscales (default cap: 4000 px in either dimension) — older Revit versions had an undocumented internal cap around 8000 px and `ImageTypeSource.Import` embeds the entire decoded raster into the .rvt, so a generous cap also keeps file size manageable. 4000 px is still ≥1 pixel per inch on a 333-foot building — plenty for floor-plan overlays.
+  4. Re-encodes as PNG via `PngBitmapEncoder` and returns the new bytes.
+- Both image-creation entry points (`PlaceImageAndAskForVerification` step 2 + `OfferVisualAlignmentCoreImpl` initial-image transaction) now route through `NormalizeForRevit` BEFORE writing the temp file. The normalised PNG always ends up as `EkahauRead_*.png` / `EkahauVisCal_*.png`, regardless of the source format.
+- The Debug log records the normalisation result on every read, e.g. `[ESX Read] WIC re-encode: 5000x3571 → 4000x2857 PNG (1,816,148 → 8,234,567 bytes)`.
+
+### Why this is the right fix
+- It addresses a known, reproduced Revit API quirk rather than treating the symptom.
+- It uses the same WIC engine Revit uses internally, so if WIC can decode the source, the resulting PNG is guaranteed to be Revit-acceptable.
+- It's defence-in-depth — combines with v2.5.13 (`bitmapImageId`) and v2.5.15 (extension matching) without removing either, so any of the three protections still catches edge cases.
+- Failure mode is explicit — if WIC itself can't decode the input, `NormalizeForRevit` returns null and surfaces the WIC error, which we'll see in the v2.5.12 diagnostic dialog.
+
 ## [2.5.15] — 2026-05-04
 
 ### Fixed

@@ -2147,9 +2147,18 @@ namespace EkahauRevitPlugin
                 Debug.WriteLine($"[ESX Read] SVG detected, embedded raster extracted ({imgBytes.Length:N0} bytes).");
 
             // ── 2. Write image to a temp file (ImageType.Create takes a path) ──
+            //   Re-encode through WPF/WIC as a clean baseline PNG so
+            //   Revit's import path doesn't silently reject the file
+            //   (see v2.5.16 — even valid JPEGs trip this).
+            byte[] normalized = ImageNormalizer.NormalizeForRevit(
+                imgBytes, out string normDetail);
+            Debug.WriteLine($"[ESX Read] WIC re-encode: {normDetail}");
+            if (normalized != null && normalized.Length > 100)
+                imgBytes = normalized;
+
             //   Match the file extension to the actual raster format —
-            //   Revit's WIC dispatch is extension-driven, so JPEG bytes
-            //   in a .png-named file return null with no exception.
+            //   Revit's WIC dispatch is extension-driven.  After the
+            //   normalisation above this should always be .png.
             string ext = ImageNormalizer.DetectExtension(imgBytes);
             string imgPath = Path.Combine(
                 Path.GetTempPath(),
@@ -2704,11 +2713,26 @@ namespace EkahauRevitPlugin
             if (norm.WasSvg)
                 Debug.WriteLine($"[ESX Read] SVG detected, embedded raster extracted ({imgBytes.Length:N0} bytes).");
 
+            // Re-encode through WPF/WIC as a clean baseline PNG.  Even
+            // valid JPEGs can make Revit's ImageType.Create return NULL
+            // silently (Autodesk-confirmed: "JPEG response data from
+            // certain sources may not be readable… while PNG or BMP has
+            // no issue with the same code").  Round-tripping through
+            // the same WIC engine Revit uses produces a vanilla PNG that
+            // Revit reliably accepts, and gives us an explicit failure
+            // diagnostic if WIC itself can't decode the input.
+            byte[] normalized = ImageNormalizer.NormalizeForRevit(
+                imgBytes, out string normDetail);
+            Debug.WriteLine($"[ESX Read] WIC re-encode: {normDetail}");
+            if (normalized != null && normalized.Length > 100)
+                imgBytes = normalized;
+
             // Pick the temp-file extension to match the actual raster
-            // format — Revit's ImageType.Create dispatches its WIC decoder
-            // by extension, so a JPEG inside a .png-named file silently
-            // returns null (the v2.5.14 symptom for SVG-companion exports
-            // where bitmapImageId points at JPEG bytes).
+            // format — Revit's ImageType.Create dispatches its WIC
+            // decoder by extension, so a JPEG inside a .png-named file
+            // silently returns null (v2.5.14 symptom for SVG-companion
+            // exports).  After NormalizeForRevit this should always be
+            // .png, but DetectExtension is harmless either way.
             string ext = ImageNormalizer.DetectExtension(imgBytes);
             string imgPath = Path.Combine(
                 Path.GetTempPath(),

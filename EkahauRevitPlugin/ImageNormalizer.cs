@@ -3,6 +3,8 @@ using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 
 namespace EkahauRevitPlugin
 {
@@ -184,6 +186,102 @@ namespace EkahauRevitPlugin
                 return ".webp";
 
             return ".png";
+        }
+
+        /// <summary>
+        /// Re-encode an arbitrary raster as a clean baseline PNG via the
+        /// same WIC engine Revit's <c>ImageType.Create</c> uses.
+        ///
+        /// Why: even a perfectly valid JPEG (e.g. 5000×3571 baseline 8-bit
+        /// RGB JFIF, as Ekahau ships in <c>bitmapImageId</c>) can make
+        /// Revit's <c>ImageType.Create</c> return NULL silently — the
+        /// Autodesk Revit API forum has multiple confirmed reports of
+        /// "JPEG response data from certain sources may not be readable…
+        /// while PNG or BMP has no issue with the same code".  Round-
+        /// tripping through <see cref="BitmapDecoder"/> +
+        /// <see cref="PngBitmapEncoder"/> normalises pixel format,
+        /// strips colour profiles, and produces a vanilla PNG that
+        /// Revit reliably accepts.
+        ///
+        /// Optionally downscales when either dimension exceeds
+        /// <paramref name="maxDim"/>.  Older Revit versions had an
+        /// undocumented internal cap around 8000 px and Revit's "Import"
+        /// source embeds the entire decoded raster into the .rvt, so a
+        /// generous cap keeps file size manageable too.  4000 px is a
+        /// safe default for floor-plan overlays — that's still ≥1px per
+        /// inch on a 333-foot building.
+        ///
+        /// Returns the new PNG bytes on success, or null + a diagnostic
+        /// in <paramref name="detail"/> on failure (caller surfaces this
+        /// in the error dialog).
+        /// </summary>
+        public static byte[] NormalizeForRevit(
+            byte[] inputBytes, out string detail, int maxDim = 4000)
+        {
+            detail = "";
+            if (inputBytes == null || inputBytes.Length == 0)
+            {
+                detail = "no input bytes";
+                return null;
+            }
+
+            try
+            {
+                BitmapSource src;
+                using (var ms = new MemoryStream(inputBytes))
+                {
+                    var decoder = BitmapDecoder.Create(
+                        ms,
+                        BitmapCreateOptions.PreservePixelFormat,
+                        BitmapCacheOption.OnLoad);   // OnLoad = release stream
+                    if (decoder.Frames.Count == 0)
+                    {
+                        detail = "decoder returned 0 frames";
+                        return null;
+                    }
+                    src = decoder.Frames[0];
+                }
+
+                int origW = src.PixelWidth;
+                int origH = src.PixelHeight;
+
+                // Force Bgra32 — strips ICC profiles + neutralises any
+                // odd source pixel format that Revit's import path
+                // rejects.
+                if (src.Format != PixelFormats.Bgra32)
+                    src = new FormatConvertedBitmap(src, PixelFormats.Bgra32, null, 0);
+
+                // Optional downscale.  Preserves aspect ratio.
+                double scale = 1.0;
+                if (origW > maxDim || origH > maxDim)
+                    scale = Math.Min((double)maxDim / origW, (double)maxDim / origH);
+
+                if (scale < 0.999)
+                {
+                    src = new TransformedBitmap(src, new ScaleTransform(scale, scale));
+                    src.Freeze();
+                }
+
+                int outW = src.PixelWidth;
+                int outH = src.PixelHeight;
+
+                var encoder = new PngBitmapEncoder();
+                encoder.Frames.Add(BitmapFrame.Create(src));
+                using (var outMs = new MemoryStream())
+                {
+                    encoder.Save(outMs);
+                    var result = outMs.ToArray();
+                    detail = $"{origW}x{origH} → {outW}x{outH} PNG " +
+                             $"({inputBytes.Length:N0} → {result.Length:N0} bytes)";
+                    return result;
+                }
+            }
+            catch (Exception ex)
+            {
+                detail = $"WPF/WIC re-encode failed: {ex.GetType().Name}: {ex.Message}";
+                Debug.WriteLine($"[ImageNormalizer] {detail}");
+                return null;
+            }
         }
     }
 }
