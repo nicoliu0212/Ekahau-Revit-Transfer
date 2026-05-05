@@ -5,6 +5,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.20] — 2026-05-05
+
+### Added
+- **End-to-end diagnostic logging for the visual-cal → AP placement pipeline.** v2.5.19's apScale fix should have aligned APs with the rotated image, but a user reports APs still appear rotated 90° relative to the view despite the image being correctly placed. The on-paper math checks out, so this release ships verbose `Debug.WriteLine` output at every transformation boundary so we can capture the actual numbers via SysInternals DebugView and pinpoint where the 90° offset originates.
+- Logging covers:
+  - **Visual-cal picks** — `modelPt1/2`, `imagePt1/2`, derived `ek1/ek2` pixel coords, image dimensions, `fp.Width/Height`, and `fp.MetersPerUnit`.
+  - **Visual-cal computed transform** — `modelDist`, `modelAngle°`, `ekDist`, `ekAngle°`, `rotation°`, `ftPerPx`, `cosR`, `sinR`.
+  - **Synthesised anchor** — every field (CropWorld, CropPixel, ImageWidth/Height, anchorEk, anchorR, Local bounds, basis matrix, derived MetersPerUnit) plus the expected `apScale` factor.
+  - **First 3 AP placements** — input `(ap.PixelX, ap.PixelY)` and resulting world `(wx, wy)` from the calibrated xform. Limited to the first 3 to avoid flooding the log with 360+ lines.
+  - The existing `BuildEkahauToRevitXform Mode 1` log line (added in v2.5.19) reports the actual `apScale` at xform-build time.
+
+### How to capture
+1. Install v2.5.20.
+2. Download **DebugView** from SysInternals (https://learn.microsoft.com/en-us/sysinternals/downloads/debugview), run it as admin, and tick "Capture Win32" + "Capture Global Win32".
+3. Filter for `[Visual Cal]` and `[ESX Read]` to keep the noise down.
+4. Run ESX Read, do the manual two-point alignment, save the captured log.
+
+The log output will pin down exactly which transformation step produces the 90° offset — whether it's in the angle calculation (`ekAngle` vs `modelAngle`), the basis matrix, the apScale, or somewhere else entirely.
+
 ## [2.5.19] — 2026-05-05
 
 ### Fixed

@@ -1967,11 +1967,25 @@ namespace EkahauRevitPlugin
                     {
                         tx.Start();
 
+                        int apIdx = 0;
                         foreach (var ap in apsToPlace)
                         {
                             try
                             {
                                 var (wx, wy) = xform(ap.PixelX, ap.PixelY);
+
+                                // Diagnostic dump for the first 3 APs only
+                                // (avoid flooding DebugView with 360+ lines).
+                                if (apIdx < 3)
+                                {
+                                    Debug.WriteLine(
+                                        $"[ESX Read] AP placement #{apIdx}: " +
+                                        $"name='{ap.Name}', " +
+                                        $"input pixel=({ap.PixelX:F2}, {ap.PixelY:F2}), " +
+                                        $"world=({wx:F3}, {wy:F3}) ft");
+                                }
+                                apIdx++;
+
                                 string bandStr = EsxMarkerOps.FormatBands(ap.Bands);
                                 var    color   = EsxMarkerOps.GetBandColor(ap.Bands);
 
@@ -3049,6 +3063,28 @@ namespace EkahauRevitPlugin
             double cosR       = Math.Cos(rotation);
             double sinR       = Math.Sin(rotation);
 
+            // ── Diagnostic dump (v2.5.20) — captured in DebugView ──────
+            //   Critical numbers for diagnosing AP/image alignment bugs
+            //   when the user reports "image OK but APs rotated".
+            Debug.WriteLine(
+                "[Visual Cal] === picks ===\n" +
+                $"  modelPt1 = ({modelPt1.X:F3}, {modelPt1.Y:F3}) ft\n" +
+                $"  modelPt2 = ({modelPt2.X:F3}, {modelPt2.Y:F3}) ft\n" +
+                $"  imagePt1 = ({imagePt1.X:F3}, {imagePt1.Y:F3}) ft\n" +
+                $"  imagePt2 = ({imagePt2.X:F3}, {imagePt2.Y:F3}) ft\n" +
+                $"  ek1 (px) = ({ek1x:F2}, {ek1y:F2})\n" +
+                $"  ek2 (px) = ({ek2x:F2}, {ek2y:F2})\n" +
+                $"  imgPxW   = {imgPxW}, imgPxH = {imgPxH}\n" +
+                $"  fp.Width = {fp.Width:F1}, fp.Height = {fp.Height:F1}\n" +
+                $"  fp.MetersPerUnit = {fp.MetersPerUnit:F6}");
+            Debug.WriteLine(
+                "[Visual Cal] === computed transform ===\n" +
+                $"  modelDist = {modelDist:F3} ft, modelAngle = {modelAngle * 180.0 / Math.PI:F2}°\n" +
+                $"  ekDist    = {ekDist:F2} px, ekAngle    = {ekAngle * 180.0 / Math.PI:F2}°\n" +
+                $"  rotation  = {rotation * 180.0 / Math.PI:F2}°\n" +
+                $"  ftPerPx   = {ftPerPx:F6} (ft per bitmap pixel)\n" +
+                $"  cosR = {cosR:F4}, sinR = {sinR:F4}");
+
             // Sanity check vs declared metersPerUnit
             double mpuFtPerPx = mpu / 0.3048;
             double scaleErr   = mpuFtPerPx > 0
@@ -3188,6 +3224,22 @@ namespace EkahauRevitPlugin
             TransformPx(imgPxW, 0);
             TransformPx(imgPxW, imgPxH);
             TransformPx(0, imgPxH);
+
+            Debug.WriteLine(
+                "[Visual Cal] === synthesised anchor ===\n" +
+                $"  CropWorld   = ({minWX:F2}..{maxWX:F2}, {minWY:F2}..{maxWY:F2}) ft\n" +
+                $"  CropPixel   = ({imgPxW}x{imgPxH})  (anchor frame)\n" +
+                $"  ImageWidth  = {imgPxW}, ImageHeight = {imgPxH}\n" +
+                $"  anchorEk    = ({anchorEkX:F2}, {anchorEkY:F2}) px\n" +
+                $"  anchorR     = ({anchorRX:F3}, {anchorRY:F3}) ft\n" +
+                $"  Local       = ({-anchorEkX * ftPerPx:F2}..{(imgPxW - anchorEkX) * ftPerPx:F2}, " +
+                $"{-(imgPxH - anchorEkY) * ftPerPx:F2}..{anchorEkY * ftPerPx:F2}) ft\n" +
+                $"  Basis       = [{cosR:F4} {sinR:F4}; {-sinR:F4} {cosR:F4}]\n" +
+                $"  MetersPerUnit (synthesised) = {ftPerPx * 0.3048:F6} m/px\n" +
+                $"  fp.Width = {fp.Width:F1}, fp.Height = {fp.Height:F1}\n" +
+                $"  expected apScale (in BuildEkahauToRevitXform) = " +
+                $"({(fp.Width  > 0 ? imgPxW / fp.Width  : 1.0):F4}x" +
+                $"{(fp.Height > 0 ? imgPxH / fp.Height : 1.0):F4})");
 
             return new EsxRevitAnchorData
             {
