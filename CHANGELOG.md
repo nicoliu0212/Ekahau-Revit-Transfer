@@ -5,6 +5,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.18] — 2026-05-05
+
+### Fixed
+- **Manual visual alignment: image rotates correctly but AP markers ignored the rotation** — after the user picked their two reference pairs, `OfferVisualAlignmentCore` synthesised an `EsxRevitAnchorData` whose basis vectors encoded the rotation `(cos R, sin R, -sin R, cos R)`. AP markers placed via `BuildEkahauToRevitXform` honoured that rotation, but `EsxMarkerOps.PlaceFloorPlanImage` (which re-places the verification overlay during the recursive `PlaceImageAndAskForVerification` call after manual alignment) never read the basis vectors — it placed the image axis-aligned at the AABB centre. The mismatch made the AP markers look like they had the wrong rotation, when in fact it was the image that was missing the rotation.
+
+### Changed
+- `EsxMarkerOps.PlaceFloorPlanImage` now reads the rotation from the anchor's basis vectors and applies it to the placed image:
+  ```csharp
+  if (anchor.HasTransform)
+  {
+      double rotation = Math.Atan2(anchor.XformBasisXy, anchor.XformBasisXx);
+      if (Math.Abs(rotation) > 1e-4)
+          ElementTransformUtils.RotateElement(doc, imgInst.Id, axis, rotation);
+  }
+  ```
+  The AABB centre we compute IS the rotation centre (centroid of the 4 rotated corners is preserved by rotation), so a single `RotateElement` around `(centerX, centerY)` lands the image exactly where `BuildEkahauToRevitXform` expects it. AP markers (which use the same xform) then line up with image features as intended.
+- The Debug log records every rotation: `[ESX Read] Image rotated by 12.34° around (123.45, 67.89) to match anchor basis.`
+
+### Why this is the right fix
+The root cause was that two different code paths consumed the anchor: `BuildEkahauToRevitXform` (used for AP placement) consulted `XformBasis*` and applied rotation; `PlaceFloorPlanImage` (used for the image overlay) consulted only `CropWorld*` AABB bounds and ignored rotation. v2.5.18 closes that gap so all anchor consumers honour the rotation. ESX-Export-derived anchors (which historically have `XformBasisXx = 1, XformBasisXy = 0` → rotation = 0) are unaffected — they place the image identically to before.
+
 ## [2.5.17] — 2026-05-04
 
 ### Fixed

@@ -1391,6 +1391,45 @@ namespace EkahauRevitPlugin
                 catch { }
             }
 
+            // ── Step 8b: Rotation (visual-cal anchors carry rotation) ──
+            //   When the user manually aligned the image via the two-point
+            //   visual calibration, the synthesised anchor encodes the
+            //   rotation in the basis vectors:
+            //       XformBasisXx = cos(R), XformBasisXy = sin(R)
+            //       XformBasisYx = -sin(R), XformBasisYy = cos(R)
+            //   The AABB-based centre we computed above IS the rotation
+            //   centre (centroid of the 4 rotated corners), so a single
+            //   RotateElement call around (centerX, centerY) by R lands
+            //   the image exactly where BuildEkahauToRevitXform expects
+            //   it — and AP markers (which use the same xform) will then
+            //   line up with image features.
+            //
+            //   Without this step the visual-cal flow leaves the image
+            //   axis-aligned while APs go through the rotated transform,
+            //   producing the v2.5.18 symptom: "image alignment is fine
+            //   but APs ignore rotation".
+            if (anchor.HasTransform)
+            {
+                double rotation = Math.Atan2(anchor.XformBasisXy, anchor.XformBasisXx);
+                if (Math.Abs(rotation) > 1e-4)
+                {
+                    try
+                    {
+                        var axis = Line.CreateBound(
+                            new XYZ(centerX, centerY, zElev),
+                            new XYZ(centerX, centerY, zElev + 1));
+                        ElementTransformUtils.RotateElement(doc, imgInst.Id, axis, rotation);
+                        Debug.WriteLine(
+                            $"[ESX Read] Image rotated by {rotation * 180.0 / Math.PI:F2}° " +
+                            $"around ({centerX:F2}, {centerY:F2}) to match anchor basis.");
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"[ESX Read] Image rotation failed: {ex.Message}");
+                    }
+                }
+            }
+
             // ── Step 9: Read-back verification — overlap with CropBox ──
             try
             {
