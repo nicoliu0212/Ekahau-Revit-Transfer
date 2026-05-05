@@ -5,6 +5,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.21] — 2026-05-05
+
+### Added
+- **File-based diagnostic log** — v2.5.20 routed every visual-cal + AP-placement number through `Debug.WriteLine` for SysInternals DebugView capture, but DebugView setup is non-trivial. v2.5.21 ALSO writes the same content to a plain-text file at:
+  ```
+  %USERPROFILE%\Documents\EkahauRevitPlugin_diag.log
+  ```
+  Each ESX Read run starts with a session header showing the plugin version, floor-plan name, and matched view name. Subsequent lines log the same picks / transform / anchor / per-AP placement data the v2.5.20 release added. Just send the file as an attachment — no SysInternals install required.
+- New `EsxReadCommand.DiagLog(string message)` helper — writes to BOTH `Debug.WriteLine` (DebugView) AND the file (append-only). Used at every diagnostic point in the visual-cal pipeline.
+- `BuildEkahauToRevitXform Mode 1` log line now also includes the basis matrix, origin, and local-bounds rectangle so we can verify the rotation/scale is applied in the right direction.
+
+### How to use
+1. Install v2.5.21 over the top of any earlier version.
+2. Run ESX Read against the problematic `.esx`, do the manual two-point alignment, let it place the AP markers.
+3. Open `%USERPROFILE%\Documents\EkahauRevitPlugin_diag.log` (e.g., `C:\Users\<you>\Documents\EkahauRevitPlugin_diag.log`).
+4. Send the file (or copy the latest `========== ESX Read ==========` session block).
+
+The file grows on every run — delete it manually if it gets too large.
+
 ## [2.5.20] — 2026-05-05
 
 ### Added

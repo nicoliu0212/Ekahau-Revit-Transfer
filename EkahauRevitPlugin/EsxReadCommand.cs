@@ -726,10 +726,13 @@ namespace EkahauRevitPlugin
                 // mark by the (CropPixelWidth / fp.Width) ratio.
                 double apScaleX = (floorPlan.Width  > 0) ? cW / floorPlan.Width  : 1.0;
                 double apScaleY = (floorPlan.Height > 0) ? cH / floorPlan.Height : 1.0;
-                Debug.WriteLine(
+                EsxReadCommand.DiagLog(
                     $"[ESX Read] BuildEkahauToRevitXform Mode 1: " +
                     $"CropPixel=({cW:F1}x{cH:F1}), fp=({floorPlan.Width:F1}x{floorPlan.Height:F1}), " +
-                    $"apScale=({apScaleX:F4}x{apScaleY:F4})");
+                    $"apScale=({apScaleX:F4}x{apScaleY:F4}), " +
+                    $"basis=[{bXx:F4} {bXy:F4}; {bYx:F4} {bYy:F4}], " +
+                    $"origin=({oX:F2},{oY:F2}), " +
+                    $"local=({lMinX:F2}..{lMaxX:F2},{lMinY:F2}..{lMaxY:F2})");
 
                 return (ex, ey) =>
                 {
@@ -1974,11 +1977,11 @@ namespace EkahauRevitPlugin
                             {
                                 var (wx, wy) = xform(ap.PixelX, ap.PixelY);
 
-                                // Diagnostic dump for the first 3 APs only
-                                // (avoid flooding DebugView with 360+ lines).
-                                if (apIdx < 3)
+                                // Diagnostic dump for the first 5 APs only
+                                // (avoid flooding the log with 360+ lines).
+                                if (apIdx < 5)
                                 {
-                                    Debug.WriteLine(
+                                    DiagLog(
                                         $"[ESX Read] AP placement #{apIdx}: " +
                                         $"name='{ap.Name}', " +
                                         $"input pixel=({ap.PixelX:F2}, {ap.PixelY:F2}), " +
@@ -2530,6 +2533,45 @@ namespace EkahauRevitPlugin
             }
         }
 
+        // ──────────────────────────────────────────────────────────────
+        //  Diagnostic logging — writes to BOTH Debug.WriteLine (for
+        //  DebugView capture) AND a plain-text file in the user's
+        //  Documents folder so the user can share it without having to
+        //  set up SysInternals DebugView.
+        //
+        //  File path: %USERPROFILE%\Documents\EkahauRevitPlugin_diag.log
+        //  Each ESX Read run appends; reset by deleting the file
+        //  manually if it grows too large.
+        // ──────────────────────────────────────────────────────────────
+
+        private static readonly Lazy<string> _diagLogPath = new Lazy<string>(() =>
+        {
+            try
+            {
+                var docs = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+                if (string.IsNullOrEmpty(docs)) docs = Path.GetTempPath();
+                return Path.Combine(docs, "EkahauRevitPlugin_diag.log");
+            }
+            catch { return Path.Combine(Path.GetTempPath(), "EkahauRevitPlugin_diag.log"); }
+        });
+
+        /// <summary>
+        /// Diagnostic log line — goes to both Debug.WriteLine (for live
+        /// DebugView capture) and an append-only file in the user's
+        /// Documents folder.  Never throws (file write failures are
+        /// silently swallowed).
+        /// </summary>
+        internal static void DiagLog(string message)
+        {
+            Debug.WriteLine(message);
+            try
+            {
+                string ts = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
+                File.AppendAllText(_diagLogPath.Value, $"[{ts}] {message}\n");
+            }
+            catch { /* don't break the workflow on log failure */ }
+        }
+
         /// <summary>
         /// Robust lookup of image bytes for a floor plan.
         ///
@@ -2776,7 +2818,11 @@ namespace EkahauRevitPlugin
             bool skipIntro)
         {
             Document doc = view.Document;
-            Debug.WriteLine($"[ESX Read] OfferVisualAlignmentCore: start (skipIntro={skipIntro}, fp='{fp?.Name}')");
+            DiagLog($"\n========== ESX Read — Visual Alignment session ==========\n" +
+                    $"  Plugin version : {VersionInfo.Version}\n" +
+                    $"  Floor plan     : '{fp?.Name}' (id={fp?.Id})\n" +
+                    $"  View           : '{view?.Name}'\n" +
+                    $"  skipIntro      : {skipIntro}");
 
             // ── 1. Image bytes → temp file ──────────────────────────
             //   Same robust lookup as PlaceImageAndAskForVerification:
@@ -3063,10 +3109,11 @@ namespace EkahauRevitPlugin
             double cosR       = Math.Cos(rotation);
             double sinR       = Math.Sin(rotation);
 
-            // ── Diagnostic dump (v2.5.20) — captured in DebugView ──────
-            //   Critical numbers for diagnosing AP/image alignment bugs
-            //   when the user reports "image OK but APs rotated".
-            Debug.WriteLine(
+            // ── Diagnostic dump (v2.5.20+) ─────────────────────────────
+            //   Captured in BOTH DebugView (Debug.WriteLine) AND a file
+            //   at %USERPROFILE%\Documents\EkahauRevitPlugin_diag.log
+            //   so the user can share it without setting up DebugView.
+            DiagLog(
                 "[Visual Cal] === picks ===\n" +
                 $"  modelPt1 = ({modelPt1.X:F3}, {modelPt1.Y:F3}) ft\n" +
                 $"  modelPt2 = ({modelPt2.X:F3}, {modelPt2.Y:F3}) ft\n" +
@@ -3077,7 +3124,7 @@ namespace EkahauRevitPlugin
                 $"  imgPxW   = {imgPxW}, imgPxH = {imgPxH}\n" +
                 $"  fp.Width = {fp.Width:F1}, fp.Height = {fp.Height:F1}\n" +
                 $"  fp.MetersPerUnit = {fp.MetersPerUnit:F6}");
-            Debug.WriteLine(
+            DiagLog(
                 "[Visual Cal] === computed transform ===\n" +
                 $"  modelDist = {modelDist:F3} ft, modelAngle = {modelAngle * 180.0 / Math.PI:F2}°\n" +
                 $"  ekDist    = {ekDist:F2} px, ekAngle    = {ekAngle * 180.0 / Math.PI:F2}°\n" +
@@ -3225,7 +3272,7 @@ namespace EkahauRevitPlugin
             TransformPx(imgPxW, imgPxH);
             TransformPx(0, imgPxH);
 
-            Debug.WriteLine(
+            DiagLog(
                 "[Visual Cal] === synthesised anchor ===\n" +
                 $"  CropWorld   = ({minWX:F2}..{maxWX:F2}, {minWY:F2}..{maxWY:F2}) ft\n" +
                 $"  CropPixel   = ({imgPxW}x{imgPxH})  (anchor frame)\n" +
