@@ -5,6 +5,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.19] — 2026-05-05
+
+### Fixed
+- **AP markers placed at wrong positions for third-party Ekahau files** (where bitmap raster resolution ≠ floorPlans.json logical dimensions). The user's `.esx` had:
+  - `floorPlans.json width = 3024.0` (logical floor plan units, where AP coords live)
+  - `images.json bitmapImageId resolutionWidth = 5000` (rendered raster resolution, downscaled to 4000 by v2.5.16's `NormalizeForRevit`)
+  - AP `coord X` ranges from 265 to 2620 — fits in 3024-space, NOT in 4000-space
+  
+  v2.5.18 fixed the IMAGE rotation, but APs still landed in the wrong positions because `BuildEkahauToRevitXform` Mode 1 fed AP coords (in 3024-space) into a transform whose `CropPixelWidth = 4000` — missing the mark by the (4000/3024 ≈ 1.32) ratio.
+
+### Changed
+- **`BuildEkahauToRevitXform` Mode 1 + Mode 2 now scale AP coords from `floorPlan.Width`-space to `anchor.CropPixelWidth`-space** before applying the transform:
+  ```csharp
+  double apScaleX = (floorPlan.Width  > 0) ? cW / floorPlan.Width  : 1.0;
+  double apScaleY = (floorPlan.Height > 0) ? cH / floorPlan.Height : 1.0;
+  return (ex, ey) =>
+  {
+      double sx = ex * apScaleX;
+      double sy = ey * apScaleY;
+      // ... existing transform on (sx, sy) ...
+  };
+  ```
+- ESX-Export-derived anchors are unaffected: they have `CropPixelWidth == fp.Width` (both written from `imgW` in `EsxExportCommand`), so `apScale = 1.0` and the transform is identical to before.
+
+### Added
+- Debug log line on every Mode 1 build, e.g.:
+  ```
+  [ESX Read] BuildEkahauToRevitXform Mode 1: CropPixel=(4000.0x2857.0), fp=(3024.0x2160.0), apScale=(1.3228x1.3227)
+  ```
+  This makes it instantly visible in DebugView whether the scaling is being applied and what factor it computed.
+
+### Why this is the right fix
+The bug was a coordinate-system mismatch, not a rotation/positioning bug per se. Two coordinate systems were leaking across the abstraction boundary:
+- **Image / image-pixel space** = the actual raster's pixel dimensions (5000×3571 → downscaled to 4000×2857)
+- **Logical / floorPlans.json space** = where AP coords are stored (3024×2160 in this file)
+
+For ESX-Export-derived files these are the same — the exported PNG is what fp.Width refers to. For third-party Ekahau files (especially when the floor plan was imported from a high-res source like a PDF), they diverge. The fix makes `BuildEkahauToRevitXform` aware of both spaces and bridges them at the boundary.
+
 ## [2.5.18] — 2026-05-05
 
 ### Fixed

@@ -707,11 +707,38 @@ namespace EkahauRevitPlugin
                 double bYx = anchor.XformBasisYx;
                 double bYy = anchor.XformBasisYy;
 
+                // AP coordinates in `.esx` are in floorPlans.json logical
+                // units (floorPlan.Width × floorPlan.Height).  The
+                // anchor's CropPixelWidth/Height frame may be in a
+                // DIFFERENT pixel resolution — e.g., visual-cal anchors
+                // synthesised after the v2.5.16 NormalizeForRevit
+                // downscale store the bitmap-pixel dimensions (4000×2857
+                // for a 5000×3571 source clamped to maxDim=4000), NOT
+                // floorPlans.json's logical 3024×2160.  ESX-Export-
+                // derived anchors have CropPixelWidth == floorPlan.Width
+                // so apScale = 1.0 (no behavioural change for those).
+                //
+                // For third-party Ekahau files where the bitmap raster is
+                // a higher-resolution rendering of the logical floor plan
+                // (the v2.5.18 symptom), apScale ≠ 1.0 — without this
+                // scaling step AP markers land at fp.Width-space positions
+                // through a CropPixelWidth-space transform, missing the
+                // mark by the (CropPixelWidth / fp.Width) ratio.
+                double apScaleX = (floorPlan.Width  > 0) ? cW / floorPlan.Width  : 1.0;
+                double apScaleY = (floorPlan.Height > 0) ? cH / floorPlan.Height : 1.0;
+                Debug.WriteLine(
+                    $"[ESX Read] BuildEkahauToRevitXform Mode 1: " +
+                    $"CropPixel=({cW:F1}x{cH:F1}), fp=({floorPlan.Width:F1}x{floorPlan.Height:F1}), " +
+                    $"apScale=({apScaleX:F4}x{apScaleY:F4})");
+
                 return (ex, ey) =>
                 {
+                    // Convert AP coord from fp.Width-space to anchor frame
+                    double sx = ex * apScaleX;
+                    double sy = ey * apScaleY;
                     // Pixel → view-local
-                    double vx = lMinX + (ex - offX) / cW * cropW;
-                    double vy = lMaxY - (ey - offY) / cH * cropH;
+                    double vx = lMinX + (sx - offX) / cW * cropW;
+                    double vy = lMaxY - (sy - offY) / cH * cropH;
                     // View-local → world via CropBox Transform
                     double wx = oX + bXx * vx + bYx * vy;
                     double wy = oY + bXy * vx + bYy * vy;
@@ -733,10 +760,21 @@ namespace EkahauRevitPlugin
                 double worldW = wMaxX - wMinX;
                 double worldH = wMaxY - wMinY;
 
+                // Same fp.Width-space → anchor-frame scaling as Mode 1
+                // (see comment above).  When CropPixelWidth was missing
+                // we already fell back to fp.Width above, so apScale
+                // becomes 1.0 in that branch — only matters when both
+                // anchor.CropPixelWidth and floorPlan.Width are present
+                // and differ.
+                double apScaleX = (floorPlan.Width  > 0) ? cW / floorPlan.Width  : 1.0;
+                double apScaleY = (floorPlan.Height > 0) ? cH / floorPlan.Height : 1.0;
+
                 return (ex, ey) =>
                 {
-                    double wx = wMinX + (ex - offX) / cW * worldW;
-                    double wy = wMaxY - (ey - offY) / cH * worldH;
+                    double sx = ex * apScaleX;
+                    double sy = ey * apScaleY;
+                    double wx = wMinX + (sx - offX) / cW * worldW;
+                    double wy = wMaxY - (sy - offY) / cH * worldH;
                     return (wx, wy);
                 };
             }
