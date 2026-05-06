@@ -39,6 +39,21 @@ namespace EkahauRevitPlugin
         /// because Revit's WIC engine can't render SVG.
         /// </summary>
         public string BitmapImageId { get; set; } = "";
+        /// <summary>
+        /// Ekahau's display-rotation hint for this floor plan, one of:
+        /// "UP" (default — no rotation), "RIGHT" (original right edge is
+        /// at the top of Ekahau's display), "DOWN" (180° rotation), or
+        /// "LEFT" (original left edge is at the top).
+        ///
+        /// AP coordinates in the .esx are stored in the ROTATED display
+        /// space.  Our visual-cal anchor is built from the ORIGINAL
+        /// bitmap pixels (because that's what's placed in Revit).  When
+        /// this field is anything other than "UP", AP coords must be
+        /// inverse-rotated back into original-image-space before they
+        /// pass through the calibration transform — see
+        /// <see cref="EsxCoordXform.RotateApFromDisplayToImageSpace"/>.
+        /// </summary>
+        public string RotateUpDirection { get; set; } = "UP";
         public EsxRevitAnchorData RevitAnchor { get; set; }
     }
 
@@ -333,6 +348,13 @@ namespace EkahauRevitPlugin
                                 // alongside SVG floor plans — prefer it
                                 // when present (Revit can't render SVG).
                                 BitmapImageId = GetStr(fp, "bitmapImageId"),
+                                // Ekahau's display-rotation hint.
+                                // "UP"|"RIGHT"|"DOWN"|"LEFT".  When ≠"UP",
+                                // AP coords are in the rotated display
+                                // space and must be inverse-rotated back
+                                // into image-space before going through
+                                // the visual-cal transform.
+                                RotateUpDirection = GetStr(fp, "rotateUpDirection", "UP"),
                             };
                             if (fp.TryGetProperty("revitAnchor", out var anchor))
                                 plan.RevitAnchor = ParseRevitAnchor(anchor);
@@ -677,6 +699,64 @@ namespace EkahauRevitPlugin
     public static class EsxCoordXform
     {
         private const double FeetToMetres = 0.3048;
+
+        /// <summary>
+        /// Convert AP pixel coordinates from Ekahau's ROTATED DISPLAY
+        /// space back to the ORIGINAL IMAGE space, based on the floor
+        /// plan's <c>rotateUpDirection</c>.
+        ///
+        /// <para>Ekahau may rotate the display when importing a floor
+        /// plan (from a PDF/DWG that wasn't oriented north-up).  The
+        /// bitmap file stays in its NATIVE orientation; AP coordinates
+        /// are stored in the ROTATED DISPLAY space.  Our visual-cal
+        /// anchor is built from clicks on the native bitmap, so AP
+        /// coords must be inverse-rotated to match before going through
+        /// the calibration transform — otherwise APs land at positions
+        /// rotated 90°/180°/270° from where the user expects.</para>
+        ///
+        /// <para>Naming convention: <c>rotateUpDirection</c> names the
+        /// edge of the ORIGINAL image that's at the TOP of the display
+        /// after rotation, so:
+        /// <list type="bullet">
+        /// <item><c>UP</c>    — original up edge stays up. No rotation.</item>
+        /// <item><c>RIGHT</c> — original right edge is now at top. Display
+        ///   was rotated 90° CCW. Display dims swap to fp.Height × fp.Width.</item>
+        /// <item><c>DOWN</c>  — original down edge is at top. 180° rotation.
+        ///   Display dims unchanged.</item>
+        /// <item><c>LEFT</c>  — original left edge is at top. Display was
+        ///   rotated 90° CW. Display dims swap to fp.Height × fp.Width.</item>
+        /// </list></para>
+        /// </summary>
+        public static (double OrigX, double OrigY) RotateApFromDisplayToImageSpace(
+            double dispX, double dispY,
+            double fpWidth, double fpHeight,
+            string rotateUpDirection)
+        {
+            switch ((rotateUpDirection ?? "UP").Trim().ToUpperInvariant())
+            {
+                case "RIGHT":
+                    // Display rotated 90° CCW from original.
+                    // Forward: (origX, origY) → (origY, fpWidth - origX)
+                    // Inverse: (dispX, dispY) → (fpWidth - dispY, dispX)
+                    return (fpWidth - dispY, dispX);
+
+                case "DOWN":
+                    // Display rotated 180° from original.
+                    // Inverse: (dispX, dispY) → (fpWidth - dispX, fpHeight - dispY)
+                    return (fpWidth - dispX, fpHeight - dispY);
+
+                case "LEFT":
+                    // Display rotated 90° CW from original.
+                    // Forward: (origX, origY) → (fpHeight - origY, origX)
+                    // Inverse: (dispX, dispY) → (dispY, fpHeight - dispX)
+                    return (dispY, fpHeight - dispX);
+
+                case "UP":
+                default:
+                    // No rotation — AP coords already in image space.
+                    return (dispX, dispY);
+            }
+        }
 
         /// <summary>
         /// Build the inverse coordinate transform: Ekahau pixel (ex, ey) → Revit world (wx, wy).
@@ -1989,6 +2069,23 @@ namespace EkahauRevitPlugin
 
                 double markerRadius = EsxMarkerOps.GetAdaptiveRadius(view);
 
+                // v2.5.23 (Bug Fix #19): when Ekahau rotated the display
+                // (rotateUpDirection ≠ "UP"), AP coords are in the rotated
+                // display frame.  Our visual-cal anchor is built from the
+                // native bitmap, so AP coords need to be inverse-rotated
+                // back into image-space before they go through the xform.
+                // For floor plans with rotateUpDirection = "UP" (the
+                // common case, including the user's reported file) the
+                // rotation is the identity so this is a no-op.
+                string rotDir = (fp.RotateUpDirection ?? "UP").Trim().ToUpperInvariant();
+                if (rotDir != "UP")
+                {
+                    EsxReadCommand.DiagLog(
+                        $"[ESX Read] Floor '{fp.Name}' has rotateUpDirection='{rotDir}' — " +
+                        "AP coordinates will be inverse-rotated from display space to image space " +
+                        "before going through the calibration transform.");
+                }
+
                 // Collect band info for legend
                 var bandsSeen = new HashSet<string>();
 
@@ -2018,17 +2115,38 @@ namespace EkahauRevitPlugin
                         {
                             try
                             {
-                                var (wx, wy) = xform(ap.PixelX, ap.PixelY);
+                                // Inverse-rotate from Ekahau's display
+                                // space to native image space (no-op when
+                                // rotDir == "UP").
+                                var (apImgX, apImgY) = EsxCoordXform
+                                    .RotateApFromDisplayToImageSpace(
+                                        ap.PixelX, ap.PixelY,
+                                        fp.Width, fp.Height, rotDir);
+
+                                var (wx, wy) = xform(apImgX, apImgY);
 
                                 // Diagnostic dump for the first 5 APs only
                                 // (avoid flooding the log with 360+ lines).
                                 if (apIdx < 5)
                                 {
-                                    DiagLog(
-                                        $"[ESX Read] AP placement #{apIdx}: " +
-                                        $"name='{ap.Name}', " +
-                                        $"input pixel=({ap.PixelX:F2}, {ap.PixelY:F2}), " +
-                                        $"world=({wx:F3}, {wy:F3}) ft");
+                                    if (rotDir != "UP")
+                                    {
+                                        DiagLog(
+                                            $"[ESX Read] AP placement #{apIdx}: " +
+                                            $"name='{ap.Name}', " +
+                                            $"display pixel=({ap.PixelX:F2}, {ap.PixelY:F2}) → " +
+                                            $"image pixel=({apImgX:F2}, {apImgY:F2}) " +
+                                            $"[rotDir={rotDir}], " +
+                                            $"world=({wx:F3}, {wy:F3}) ft");
+                                    }
+                                    else
+                                    {
+                                        DiagLog(
+                                            $"[ESX Read] AP placement #{apIdx}: " +
+                                            $"name='{ap.Name}', " +
+                                            $"input pixel=({ap.PixelX:F2}, {ap.PixelY:F2}), " +
+                                            $"world=({wx:F3}, {wy:F3}) ft");
+                                    }
                                 }
                                 apIdx++;
 

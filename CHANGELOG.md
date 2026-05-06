@@ -5,6 +5,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.23] — 2026-05-05
+
+### Added (Bug Fix #19 — partial)
+- **Inverse-rotation of AP coords for Ekahau-rotated floor plans.** When Ekahau imports a floor plan from a PDF/DWG that wasn't oriented north-up, it stores AP positions in the ROTATED display space and writes the chosen rotation as `floorPlans.json[].rotateUpDirection` (one of `UP` / `RIGHT` / `DOWN` / `LEFT`). The bitmap file stays in its native orientation, so AP coords need to be inverse-rotated back into image-space before going through the visual-cal transform. Without this step, AP markers land at positions rotated 90°/180°/270° from where they should appear on the image.
+- New field `EsxFloorPlanData.RotateUpDirection` parsed from `floorPlans.json`.
+- New helper `EsxCoordXform.RotateApFromDisplayToImageSpace(dispX, dispY, fpW, fpH, rotDir)` — inverse-rotates AP coordinates from Ekahau's display space back to original image space:
+  - `UP` → identity (no rotation)
+  - `RIGHT` → `(fpWidth - dispY, dispX)` (display was 90° CCW from original)
+  - `DOWN` → `(fpWidth - dispX, fpHeight - dispY)` (180° rotation)
+  - `LEFT` → `(dispY, fpHeight - dispX)` (display was 90° CW from original)
+- AP placement loop now calls the inverse rotation BEFORE feeding coords to `xform`. The diagnostic log records both the original display pixel and the inverse-rotated image pixel for the first 5 APs when `rotDir != "UP"`.
+
+### Note for the user with the "AP positions don't match image" report
+The user's `floorPlans.json` for *Related Digital Michigan 20251119.0* has `rotateUpDirection = "UP"`, so this fix is a no-op for that specific file (the inverse rotation is the identity). If the symptom persists in v2.5.23, the root cause is somewhere else — likely either:
+1. Stale AP markers from a previous run that weren't cleaned up (Revit's `Filter by Category` → delete all `[EK]`-tagged DetailLines / TextNotes manually, restart Revit, re-run from a clean state).
+2. The user is comparing AP positions to where they THINK they should be, but the calibration is mathematically correct relative to where the user clicked (a screenshot of the bitmap + AP markers + Revit walls, side-by-side with an Ekahau Pro screenshot of the same data, would let us verify).
+
+For floor plans actually exported with rotation (`rotateUpDirection` ≠ `"UP"`), this release should produce the right placements where v2.5.22 didn't.
+
 ## [2.5.22] — 2026-05-05
 
 ### Fixed (Bug Fix #17)
