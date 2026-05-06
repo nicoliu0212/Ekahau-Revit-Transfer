@@ -714,18 +714,24 @@ namespace EkahauRevitPlugin
         /// the calibration transform — otherwise APs land at positions
         /// rotated 90°/180°/270° from where the user expects.</para>
         ///
-        /// <para>Naming convention: <c>rotateUpDirection</c> names the
-        /// edge of the ORIGINAL image that's at the TOP of the display
-        /// after rotation, so:
+        /// <para>Naming convention (v2.5.24, matches everyday usage):
+        /// <c>rotateUpDirection</c> names the DIRECTION the display was
+        /// rotated to point "up", so:
         /// <list type="bullet">
-        /// <item><c>UP</c>    — original up edge stays up. No rotation.</item>
-        /// <item><c>RIGHT</c> — original right edge is now at top. Display
-        ///   was rotated 90° CCW. Display dims swap to fp.Height × fp.Width.</item>
-        /// <item><c>DOWN</c>  — original down edge is at top. 180° rotation.
-        ///   Display dims unchanged.</item>
-        /// <item><c>LEFT</c>  — original left edge is at top. Display was
-        ///   rotated 90° CW. Display dims swap to fp.Height × fp.Width.</item>
+        /// <item><c>UP</c>    — no rotation.  Display matches the original image.</item>
+        /// <item><c>RIGHT</c> — display rotated 90° CW from original ("right turn").
+        ///   Display dims swap to fp.Height × fp.Width.</item>
+        /// <item><c>DOWN</c>  — display rotated 180°.  Display dims unchanged.</item>
+        /// <item><c>LEFT</c>  — display rotated 90° CCW from original ("left turn").
+        ///   Display dims swap to fp.Height × fp.Width.</item>
         /// </list></para>
+        ///
+        /// <para>For floor plans with rotateUpDirection = "UP" (the
+        /// common case), this returns the input unchanged.  When/if a
+        /// real rotated .esx file shows up we can validate the LEFT/
+        /// RIGHT conventions against an Ekahau Pro screenshot and adjust
+        /// — both possible interpretations are documented in the
+        /// changelog for v2.5.23 + v2.5.24.</para>
         /// </summary>
         public static (double OrigX, double OrigY) RotateApFromDisplayToImageSpace(
             double dispX, double dispY,
@@ -735,10 +741,10 @@ namespace EkahauRevitPlugin
             switch ((rotateUpDirection ?? "UP").Trim().ToUpperInvariant())
             {
                 case "RIGHT":
-                    // Display rotated 90° CCW from original.
-                    // Forward: (origX, origY) → (origY, fpWidth - origX)
-                    // Inverse: (dispX, dispY) → (fpWidth - dispY, dispX)
-                    return (fpWidth - dispY, dispX);
+                    // Display rotated 90° CW from original.
+                    // Display dims = fpHeight × fpWidth (swapped).
+                    // Inverse: (dispX, dispY) → (dispY, fpHeight - dispX)
+                    return (dispY, fpHeight - dispX);
 
                 case "DOWN":
                     // Display rotated 180° from original.
@@ -746,10 +752,10 @@ namespace EkahauRevitPlugin
                     return (fpWidth - dispX, fpHeight - dispY);
 
                 case "LEFT":
-                    // Display rotated 90° CW from original.
-                    // Forward: (origX, origY) → (fpHeight - origY, origX)
-                    // Inverse: (dispX, dispY) → (dispY, fpHeight - dispX)
-                    return (dispY, fpHeight - dispX);
+                    // Display rotated 90° CCW from original.
+                    // Display dims = fpHeight × fpWidth (swapped).
+                    // Inverse: (dispX, dispY) → (fpWidth - dispY, dispX)
+                    return (fpWidth - dispY, dispX);
 
                 case "UP":
                 default:
@@ -2078,12 +2084,51 @@ namespace EkahauRevitPlugin
                 // common case, including the user's reported file) the
                 // rotation is the identity so this is a no-op.
                 string rotDir = (fp.RotateUpDirection ?? "UP").Trim().ToUpperInvariant();
-                if (rotDir != "UP")
+
+                // v2.5.24: ALWAYS log rotateUpDirection + AP coord ranges
+                // so every diag.log makes the rotation context explicit
+                // (previously only logged when ≠ "UP").
+                double minApX = double.MaxValue, maxApX = double.MinValue;
+                double minApY = double.MaxValue, maxApY = double.MinValue;
+                foreach (var ap in apsToPlace)
+                {
+                    if (ap.PixelX < minApX) minApX = ap.PixelX;
+                    if (ap.PixelX > maxApX) maxApX = ap.PixelX;
+                    if (ap.PixelY < minApY) minApY = ap.PixelY;
+                    if (ap.PixelY > maxApY) maxApY = ap.PixelY;
+                }
+                EsxReadCommand.DiagLog(
+                    $"[ESX Read] Floor '{fp.Name}': rotateUpDirection='{rotDir}', " +
+                    $"fp.Width={fp.Width:F1}, fp.Height={fp.Height:F1}, " +
+                    $"AP count={apsToPlace.Count}, " +
+                    $"AP raw X range=[{minApX:F1}..{maxApX:F1}], " +
+                    $"AP raw Y range=[{minApY:F1}..{maxApY:F1}]");
+
+                // Sanity check: AP coords should fit within fp.Width/Height
+                // (allowing a small margin — APs near the edge can slightly
+                // exceed bounds due to floating-point rounding).  When AP
+                // coords exceed fp dims but fit the SWAPPED dims, that's a
+                // strong signal Ekahau rotated the display and we should
+                // be inverse-rotating but rotateUpDirection = "UP" (data
+                // inconsistency, or user's expectation mismatch).
+                const double margin = 5.0;
+                bool xInWidth  = maxApX <= fp.Width  + margin;
+                bool yInHeight = maxApY <= fp.Height + margin;
+                bool xInHeight = maxApX <= fp.Height + margin;
+                bool yInWidth  = maxApY <= fp.Width  + margin;
+                if (rotDir == "UP" && (!xInWidth || !yInHeight) && xInHeight && yInWidth)
                 {
                     EsxReadCommand.DiagLog(
-                        $"[ESX Read] Floor '{fp.Name}' has rotateUpDirection='{rotDir}' — " +
-                        "AP coordinates will be inverse-rotated from display space to image space " +
-                        "before going through the calibration transform.");
+                        "[ESX Read] WARNING: AP coord ranges exceed fp.Width/fp.Height " +
+                        "but fit SWAPPED fp.Height/fp.Width.  This usually means the .esx " +
+                        "is internally rotated even though rotateUpDirection='UP'.  AP " +
+                        "markers may land 90° off from where they should appear.");
+                }
+                else if (rotDir != "UP")
+                {
+                    EsxReadCommand.DiagLog(
+                        $"[ESX Read] Floor has rotateUpDirection='{rotDir}' — AP coords " +
+                        "will be inverse-rotated from display space to image space.");
                 }
 
                 // Collect band info for legend

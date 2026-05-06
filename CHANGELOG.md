@@ -5,6 +5,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.24] — 2026-05-05
+
+### Changed
+- **`RotateApFromDisplayToImageSpace` LEFT/RIGHT cases swapped** to match the everyday-usage convention:
+  - `RIGHT` = display rotated 90° CW from original (a "right turn"), inverse `(dispY, fpHeight - dispX)`
+  - `LEFT` = display rotated 90° CCW from original (a "left turn"), inverse `(fpWidth - dispY, dispX)`
+  - `UP` and `DOWN` unchanged.
+  
+  v2.5.23 had the opposite interpretation (`RIGHT` = "original right edge at top"). Both interpretations produce identical world positions for `UP` (which is the only case in any currently-known .esx file) — when a real rotated `.esx` shows up we'll validate against an Ekahau Pro screenshot and adjust if needed.
+
+### Added
+- **Unconditional rotation diagnostic.** Every ESX Read run now logs the floor plan's `rotateUpDirection`, AP count, and AP coordinate ranges (X min/max, Y min/max) — previously this was only logged when rotation ≠ "UP". Makes coordinate-space mismatches obvious in `EkahauRevitPlugin_diag.log` regardless of whether rotation is involved.
+- **Suspicious-range warning.** When `rotateUpDirection = "UP"` but the AP coord ranges DON'T fit `fp.Width × fp.Height` AND DO fit the SWAPPED `fp.Height × fp.Width`, the log emits a `WARNING:` line saying "this usually means the .esx is internally rotated even though rotateUpDirection='UP' — AP markers may land 90° off". This catches the case where the metadata field is wrong but the data was actually rotated.
+
+### Why this release won't fix the user's reported symptom
+The user's `.esx` (`Related Digital Michigan 20251119.0`) has `rotateUpDirection = "UP"` AND AP coord ranges that fit comfortably within `fp.Width × fp.Height` (X: 265..2620 in 0..3024, Y: 1043..1691 in 0..2160), so neither the rotation transform nor the suspicious-range warning fires. The full diag.log shows AP positions are mathematically correct (AP-218 at world (-905, -795) corresponds to (21.2%, 59.8%) of the displayed image, which IS where AP-218's logical position lives). If the user still observes visible misalignment in v2.5.24, the most likely remaining causes are:
+1. Stale AP markers from earlier runs not cleaned up (manual Filter-by-Category delete + Revit restart + clean run).
+2. Reference-frame mismatch in the user's visual comparison (a side-by-side screenshot of Revit AP-218 + Ekahau Pro AP-218 would let us verify).
+3. A bug we still haven't identified, in which case the new always-on diagnostic gives the next iteration more to work with.
+
 ## [2.5.23] — 2026-05-05
 
 ### Added (Bug Fix #19 — partial)
