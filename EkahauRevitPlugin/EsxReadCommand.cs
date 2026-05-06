@@ -2131,6 +2131,67 @@ namespace EkahauRevitPlugin
                         "will be inverse-rotated from display space to image space.");
                 }
 
+                // ── v2.5.25 Bug Fix #19: interactive rotation picker ──
+                //   The .esx metadata's rotateUpDirection is sometimes
+                //   wrong (or our convention interpretation is wrong).
+                //   Rather than guess, ask the user to pick — they can
+                //   try each rotation if APs land in the wrong place
+                //   and re-run from this dialog without restarting the
+                //   whole ESX Read.
+                progress.Hide();
+                DoEvents();
+                try
+                {
+                    var rotPick = new TaskDialog("ESX Read — AP Rotation")
+                    {
+                        MainInstruction = $"Choose how to rotate AP coordinates",
+                        MainContent =
+                            $"Floor plan '{fp.Name}' has rotateUpDirection='{rotDir}' in floorPlans.json.\n\n" +
+                            "If AP markers land in the wrong positions after this run, " +
+                            "abort, re-run ESX Read, and pick a DIFFERENT rotation here.\n\n" +
+                            "Test order suggestion: UP → RIGHT → LEFT → DOWN.",
+                    };
+                    rotPick.AddCommandLink(TaskDialogCommandLinkId.CommandLink1,
+                        $"UP — use the .esx-declared rotation ('{rotDir}', no inverse rotation)",
+                        "The default. Recommended when the .esx metadata is trustworthy.");
+                    rotPick.AddCommandLink(TaskDialogCommandLinkId.CommandLink2,
+                        "RIGHT — display rotated 90° CW from original",
+                        "Try this if APs land 90° clockwise from where they should be on the image.");
+                    rotPick.AddCommandLink(TaskDialogCommandLinkId.CommandLink3,
+                        "LEFT — display rotated 90° CCW from original",
+                        "Try this if APs land 90° counter-clockwise from where they should be.");
+                    rotPick.AddCommandLink(TaskDialogCommandLinkId.CommandLink4,
+                        "DOWN — display rotated 180° from original",
+                        "Try this if APs land flipped (e.g., top-left ↔ bottom-right).");
+                    rotPick.CommonButtons = TaskDialogCommonButtons.Cancel;
+                    rotPick.DefaultButton = TaskDialogResult.CommandLink1;
+
+                    var rotResp = rotPick.Show();
+                    string oldRot = rotDir;
+                    switch (rotResp)
+                    {
+                        case TaskDialogResult.CommandLink2: rotDir = "RIGHT"; break;
+                        case TaskDialogResult.CommandLink3: rotDir = "LEFT";  break;
+                        case TaskDialogResult.CommandLink4: rotDir = "DOWN";  break;
+                        case TaskDialogResult.Cancel:
+                        case TaskDialogResult.Close:
+                            EsxReadCommand.DiagLog(
+                                "[ESX Read] User cancelled rotation picker → skipping AP placement.");
+                            apsToPlace.Clear();   // skip AP placement entirely
+                            break;
+                        // CommandLink1 = keep current rotDir (use .esx value)
+                    }
+                    EsxReadCommand.DiagLog(
+                        $"[ESX Read] User picked rotation '{rotDir}' " +
+                        $"(was '{oldRot}' from rotateUpDirection field).");
+                }
+                catch (Exception rpEx)
+                {
+                    EsxReadCommand.DiagLog($"[ESX Read] Rotation picker failed: {rpEx.Message} — using '{rotDir}'.");
+                }
+                progress.Show();
+                DoEvents();
+
                 // Collect band info for legend
                 var bandsSeen = new HashSet<string>();
 

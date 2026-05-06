@@ -5,6 +5,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.25] — 2026-05-05
+
+### Added
+- **Interactive AP-rotation picker** — between visual-cal verification and AP placement, the user now sees a TaskDialog with 4 command-link options:
+  - `UP` — use the rotation declared in `floorPlans.json` (the default — recommended when the metadata is trustworthy)
+  - `RIGHT` — display rotated 90° CW from original (try if APs land 90° CW from where they should be)
+  - `LEFT` — display rotated 90° CCW from original (try if APs land 90° CCW)
+  - `DOWN` — display rotated 180° from original (try if APs land flipped)
+  
+  The user's pick overrides the `rotateUpDirection` field for this run only. Cancel skips AP placement entirely.
+
+### Why
+v2.5.23 + v2.5.24 added the rotation handling but only used it when `rotateUpDirection ≠ "UP"`. The user's reported `.esx` has `"UP"` in the metadata BUT visually the APs land in wrong positions. Either:
+1. Ekahau's metadata is stale (the floor plan was rotated after the field was last written)
+2. Our convention interpretation is wrong for this specific Ekahau version
+3. The bug is somewhere else entirely
+
+The picker lets the user test all four rotations interactively in one ESX Read session — no rebuild, no relaunch. Whichever rotation makes APs land correctly is the answer; we can then make that the default in the next release once we know.
+
+### Diagnostic
+- The user's pick is logged via `DiagLog`:
+  ```
+  [ESX Read] User picked rotation 'RIGHT' (was 'UP' from rotateUpDirection field).
+  ```
+  So when you find the right rotation, the log records it for the next iteration of the fix.
+
 ## [2.5.24] — 2026-05-05
 
 ### Changed
