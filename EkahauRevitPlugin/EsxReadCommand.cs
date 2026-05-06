@@ -2328,6 +2328,169 @@ namespace EkahauRevitPlugin
                     }
                 }
 
+                // ── v2.5.26 Nudge: post-placement single-point AP correction ──
+                //   Even after a perfect 2-point visual cal, AP markers may
+                //   still be systematically offset from where the user expects
+                //   them on the floor plan image (Sheet borders, title-block
+                //   padding, or any source of a uniform translation that the
+                //   2-point cal didn't capture).  This dialog lets the user:
+                //     1. Click ONE existing AP marker (where it IS now)
+                //     2. Click where that AP SHOULD BE on the image
+                //   We compute the delta and shift ALL APs by that amount in
+                //   a single transaction.  Staging entries are also updated
+                //   so AP Place / staging JSON reflect the corrected positions.
+                if (stagingFloor.AccessPoints.Count > 0)
+                {
+                    progress.Hide();
+                    DoEvents();
+                    try
+                    {
+                        var nudgeDlg = new TaskDialog("ESX Read — AP Position Check")
+                        {
+                            MainInstruction = "Are the AP markers at the correct positions?",
+                            MainContent =
+                                "Compare the AP crosshair markers to the AP icons visible " +
+                                "in the placed floor plan image.\n\n" +
+                                "If they're systematically offset (e.g., shifted 5 ft south), " +
+                                "you can correct ALL markers at once by clicking where ONE " +
+                                "known AP currently is and then where it should actually be.",
+                        };
+                        nudgeDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink1,
+                            "Positions are correct — continue");
+                        nudgeDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink2,
+                            "Markers are offset — correct positions",
+                            "Click an AP marker, then click where it should actually be. " +
+                            "All markers shift by the same delta.");
+                        nudgeDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink3,
+                            "Skip — I'll move markers manually",
+                            "Select and move markers in Revit yourself before running AP Place.");
+                        nudgeDlg.DefaultButton = TaskDialogResult.CommandLink1;
+
+                        var nudgeResp = nudgeDlg.Show();
+
+                        if (nudgeResp == TaskDialogResult.CommandLink2)
+                        {
+                            bool nudgeDone = false;
+                            while (!nudgeDone)
+                            {
+                                XYZ currentPos = null, correctPos = null;
+                                try
+                                {
+                                    currentPos = uiDoc.Selection.PickPoint(
+                                        "Click on an existing AP marker (where it IS now)");
+                                    correctPos = uiDoc.Selection.PickPoint(
+                                        "Click where that AP SHOULD BE on the floor plan image");
+                                }
+                                catch (Autodesk.Revit.Exceptions.OperationCanceledException)
+                                {
+                                    DiagLog("[ESX Read] User cancelled Nudge pick — skipping correction.");
+                                    nudgeDone = true;
+                                    break;
+                                }
+
+                                double offsetX = correctPos.X - currentPos.X;
+                                double offsetY = correctPos.Y - currentPos.Y;
+                                double offsetDist = Math.Sqrt(offsetX * offsetX + offsetY * offsetY);
+                                DiagLog(
+                                    $"[ESX Read] Nudge offset: " +
+                                    $"({offsetX:F2}, {offsetY:F2}) ft = " +
+                                    $"({offsetX * 0.3048:F2}, {offsetY * 0.3048:F2}) m, " +
+                                    $"distance = {offsetDist:F2} ft");
+
+                                var confirmDlg = new TaskDialog("Confirm Nudge")
+                                {
+                                    MainInstruction = $"Apply this offset to all {stagingFloor.AccessPoints.Count} AP markers?",
+                                    MainContent =
+                                        $"Offset:    ({offsetX:F2}, {offsetY:F2}) ft\n" +
+                                        $"           ({offsetX * 0.3048:F2}, {offsetY * 0.3048:F2}) m\n" +
+                                        $"Distance:  {offsetDist:F2} ft ({offsetDist * 0.3048:F2} m)\n\n" +
+                                        $"All AP marker elements (circles + crosses + labels) " +
+                                        $"will move by this amount in a single transaction.",
+                                };
+                                confirmDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink1,
+                                    "Apply — move all markers");
+                                confirmDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink2,
+                                    "Try again — pick different points");
+                                confirmDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink3,
+                                    "Cancel correction");
+                                confirmDlg.DefaultButton = TaskDialogResult.CommandLink1;
+                                var confirmResp = confirmDlg.Show();
+
+                                if (confirmResp == TaskDialogResult.CommandLink1)
+                                {
+                                    int moved = 0, skipped = 0;
+                                    try
+                                    {
+                                        using var moveTx = new Transaction(doc, "ESX Read — Nudge AP markers");
+                                        moveTx.Start();
+                                        var moveVec = new XYZ(offsetX, offsetY, 0);
+                                        foreach (var apEntry in stagingFloor.AccessPoints)
+                                        {
+                                            foreach (var markerLongId in apEntry.MarkerElementIds)
+                                            {
+                                                try
+                                                {
+                                                    var elemId = VersionCompat.MakeId(markerLongId);
+                                                    var elem = doc.GetElement(elemId);
+                                                    if (elem == null) { skipped++; continue; }
+                                                    if (elem is ImageInstance) { skipped++; continue; }
+                                                    ElementTransformUtils.MoveElement(doc, elemId, moveVec);
+                                                    moved++;
+                                                }
+                                                catch { skipped++; }
+                                            }
+                                            // Update staging-side world position so any
+                                            // downstream consumer (AP Place, staging JSON,
+                                            // re-runs of ESX Read) sees the corrected coords.
+                                            apEntry.WorldX += offsetX;
+                                            apEntry.WorldY += offsetY;
+                                        }
+                                        moveTx.Commit();
+                                        DiagLog($"[ESX Read] Nudge applied: moved {moved} elements, skipped {skipped}.");
+                                    }
+                                    catch (Exception nudgeEx)
+                                    {
+                                        DiagLog($"[ESX Read] Nudge transaction failed: {nudgeEx.Message}");
+                                        try
+                                        {
+                                            TaskDialog.Show("Nudge failed",
+                                                $"The nudge could not be applied:\n{nudgeEx.Message}");
+                                        }
+                                        catch { }
+                                    }
+                                    nudgeDone = true;
+                                }
+                                else if (confirmResp == TaskDialogResult.CommandLink3)
+                                {
+                                    nudgeDone = true;
+                                }
+                                // CommandLink2 (try again) → loop back, re-pick
+                            }
+                        }
+                        else if (nudgeResp == TaskDialogResult.CommandLink3)
+                        {
+                            try
+                            {
+                                TaskDialog.Show("ESX Read — Manual Adjustment",
+                                    "You can now select and move AP markers in Revit yourself " +
+                                    "(or in the AP Place tool later).\n\n" +
+                                    "Note: the staging JSON written for AP Place still contains " +
+                                    "the ORIGINAL positions — AP Place reads them as-is.  If you " +
+                                    "want the staging JSON to reflect manually-moved positions, " +
+                                    "use the Nudge correction instead so positions update both " +
+                                    "in the view AND in the staging data.");
+                            }
+                            catch { }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        DiagLog($"[ESX Read] Nudge dialog flow failed: {ex.Message}");
+                    }
+                    progress.Show();
+                    DoEvents();
+                }
+
                 if (stagingFloor.AccessPoints.Count > 0)
                     stagingFloors.Add(stagingFloor);
 

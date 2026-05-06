@@ -5,6 +5,42 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.26] — 2026-05-05
+
+### Added — "Nudge All" single-point AP correction
+After AP markers are placed, the user now sees:
+
+> **Are the AP markers at the correct positions?**
+> - Positions are correct — continue
+> - Markers are offset — correct positions
+> - Skip — I'll move markers manually
+
+If the user picks **"Markers are offset"**, they then click two points:
+1. Where an existing AP marker IS now
+2. Where that AP SHOULD BE on the floor plan image
+
+The plugin computes the delta and moves ALL AP markers (and their crosses + labels) by that amount in a single transaction. The staging-side `WorldX`/`WorldY` for each `ApStagingEntry` is updated too, so AP Place / staging JSON / re-runs see the corrected positions.
+
+### Why
+Even after a perfect 2-point visual cal, AP markers may still be systematically offset from where they belong on the image — typical causes:
+- Sheet-derived `.esx` files where the image has a title-block / border padding that the cal doesn't fully resolve
+- PDF imports where the rendered raster has whitespace around the floor plan content
+- Any source of a uniform translation that the 2-point cal doesn't capture
+
+Rather than ask the user to re-do the visual cal (which won't fix a translation-only error), Nudge gives them a 2-click correction that propagates to all APs at once.
+
+### Diagnostic
+The nudge offset is logged via `DiagLog`:
+```
+[ESX Read] Nudge offset: (5.32, -1.78) ft = (1.62, -0.54) m, distance = 5.61 ft
+[ESX Read] Nudge applied: moved 1080 elements, skipped 0.
+```
+
+(For 360 APs × 3 elements/AP = 1080 detail-curve + text-note moves in one transaction.)
+
+### Limitation
+AP Place still reads the staging JSON's `WorldX`/`WorldY` (which Nudge updates correctly). If the user manually moves markers in Revit AFTER ESX Read finishes WITHOUT using Nudge, AP Place won't pick up those moves — the staging JSON has the un-moved positions. To get manually-moved positions into AP Place, use the Nudge correction (which writes back to staging) or re-run ESX Read.
+
 ## [2.5.25] — 2026-05-05
 
 ### Added
