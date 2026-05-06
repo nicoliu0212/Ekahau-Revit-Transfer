@@ -1299,8 +1299,30 @@ namespace EkahauRevitPlugin
             }
 
             double ftPerPx      = mpu * FtPerMeter_Inv;
-            double imageWidthFt  = actualPixelW * ftPerPx;
-            double imageHeightFt = actualPixelH * ftPerPx;
+
+            // ── v2.5.22 (Bug Fix #17): image dimensions in WORLD ft ────
+            //   Anchor's mpu is "meters per anchor-frame pixel" — for
+            //   visual-cal anchors (Option A) this is the FP-space pixel
+            //   (= fp.Width × fp.Height units), not the actual bitmap
+            //   pixel.  So we use CropPixelWidth/Height (= fp.Width
+            //   × fp.Height for Option A anchors) to compute the world
+            //   width.  For ESX-Export-derived anchors (where
+            //   CropPixelWidth == imgW == fp.Width), this gives the same
+            //   answer as the old `actualPixelW * ftPerPx` formula
+            //   because all three values coincide.
+            //
+            //   Falls back to the file-read pixel dimensions when the
+            //   anchor doesn't carry CropPixelWidth/Height (defensive).
+            double imageWidthFt = (anchor.CropPixelWidth > 0)
+                ? anchor.CropPixelWidth * ftPerPx
+                : actualPixelW * ftPerPx;
+            double imageHeightFt = (anchor.CropPixelHeight > 0)
+                ? anchor.CropPixelHeight * ftPerPx
+                : actualPixelH * ftPerPx;
+            Debug.WriteLine(
+                $"[ESX Read] Image size: width={imageWidthFt:F2} ft × height={imageHeightFt:F2} ft  " +
+                $"(from anchor.CropPixel={anchor.CropPixelWidth:F1}×{anchor.CropPixelHeight:F1}, " +
+                $"file actualPixel={actualPixelW}×{actualPixelH}, ftPerPx={ftPerPx:F6})");
 
             double cropMinX = anchor.CropWorldMinX_ft;
             double cropMinY = anchor.CropWorldMinY_ft;
@@ -1312,11 +1334,23 @@ namespace EkahauRevitPlugin
             // Padding compensation: when the image has annotation padding
             // around the actual CropBox, shift the placement so the crop
             // region's centre lands at the world centre we just computed.
+            //
+            // v2.5.22 (Bug Fix #17): only valid when CropPixel and the
+            // file's actual pixel dimensions are in the SAME coordinate
+            // space (the ESX-Export case).  For Option A visual-cal
+            // anchors, CropPixel = fp-space (3024×2160) and actualPixel =
+            // bitmap-pixel (4000×2857) — different spaces, comparing them
+            // gives a wrong shift.  Skip compensation in that case;
+            // the AABB-based centre already accounts for the visual
+            // cal's positioning.
             double cropPxOffX = anchor.CropPixelOffsetX;
             double cropPxOffY = anchor.CropPixelOffsetY;
             double cropPxW    = anchor.CropPixelWidth;
             double cropPxH    = anchor.CropPixelHeight;
-            if (cropPxW > 0 && cropPxH > 0)
+            bool cropPixelSpaceMatchesFile =
+                anchor.ImageWidth  > 0 && Math.Abs(anchor.ImageWidth  - cropPxW) < 0.5 &&
+                anchor.ImageHeight > 0 && Math.Abs(anchor.ImageHeight - cropPxH) < 0.5;
+            if (cropPxW > 0 && cropPxH > 0 && cropPixelSpaceMatchesFile)
             {
                 double cropCxPx = cropPxOffX + cropPxW / 2.0;
                 double cropCyPx = cropPxOffY + cropPxH / 2.0;
@@ -1326,6 +1360,15 @@ namespace EkahauRevitPlugin
                 double dyFt     = (imgCyPx - cropCyPx) * ftPerPx;
                 centerX += dxFt;     // shift right when image-centre is right of crop-centre
                 centerY -= dyFt;     // pixel Y is flipped relative to world Y
+                Debug.WriteLine(
+                    $"[ESX Read] Padding compensation applied: shift ({dxFt:F2}, {-dyFt:F2}) ft");
+            }
+            else if (cropPxW > 0 && cropPxH > 0)
+            {
+                Debug.WriteLine(
+                    $"[ESX Read] Padding compensation skipped — CropPixel ({cropPxW:F1}x{cropPxH:F1}) " +
+                    $"vs ImageWidth ({anchor.ImageWidth}x{anchor.ImageHeight}) are in different spaces " +
+                    $"(Option A visual-cal anchor).");
             }
 
             // ── Step 4: Z = the view's level elevation ─────────────────
@@ -3079,20 +3122,50 @@ namespace EkahauRevitPlugin
             double imgTop  = initCenterY + initHeightFt / 2.0;
             double placedFtPerPx = initWidthFt / imgPxW;
 
-            double ek1x = (imagePt1.X - imgLeft) / placedFtPerPx;
-            double ek1y = (imgTop - imagePt1.Y) / placedFtPerPx;   // pixel Y flipped
-            double ek2x = (imagePt2.X - imgLeft) / placedFtPerPx;
-            double ek2y = (imgTop - imagePt2.Y) / placedFtPerPx;
+            // ── 5a. Image-space picks (in BITMAP pixel coords) ────────
+            //   Used for image RE-PLACEMENT (which still operates on the
+            //   actual displayed bitmap pixels).  Suffix _img makes the
+            //   coordinate space explicit.
+            double ek1x_img = (imagePt1.X - imgLeft) / placedFtPerPx;
+            double ek1y_img = (imgTop - imagePt1.Y) / placedFtPerPx;   // pixel Y flipped
+            double ek2x_img = (imagePt2.X - imgLeft) / placedFtPerPx;
+            double ek2y_img = (imgTop - imagePt2.Y) / placedFtPerPx;
+
+            // ── 5b. FloorPlan-space picks (in fp.Width × fp.Height units) ──
+            //   Bug Fix #17 (v2.5.22) — the .esx stores AP coordinates in
+            //   floorPlans.json logical units (fp.Width × fp.Height), NOT
+            //   in the actual bitmap pixel resolution.  For Ekahau exports
+            //   where a high-res bitmap (e.g., 5000×3571) was downscaled
+            //   by NormalizeForRevit (to 4000×2857), these two spaces are
+            //   DIFFERENT and the two scales must be tracked separately.
+            //   We synthesise the anchor in fp-space so AP coords go
+            //   straight through BuildEkahauToRevitXform without further
+            //   scaling — eliminating an entire class of off-by-1.32×
+            //   bugs.
+            double scaleImgToFpX = (imgPxW > 0) ? fp.Width  / (double)imgPxW : 1.0;
+            double scaleImgToFpY = (imgPxH > 0) ? fp.Height / (double)imgPxH : 1.0;
+            double ek1x = ek1x_img * scaleImgToFpX;
+            double ek1y = ek1y_img * scaleImgToFpY;
+            double ek2x = ek2x_img * scaleImgToFpX;
+            double ek2y = ek2y_img * scaleImgToFpY;
 
             // ── 6. Compute scale + rotation ─────────────────────────
+            //   modelAngle and rotation are coordinate-space-invariant
+            //   (rotation = how much to rotate the ek frame to align with
+            //   the model frame, doesn't depend on units).  ftPerPx
+            //   depends on units, so we compute it in fp-space here for
+            //   consistency with the synthesised anchor below.
             double modelDist = Math.Sqrt(
                 (modelPt2.X - modelPt1.X) * (modelPt2.X - modelPt1.X) +
                 (modelPt2.Y - modelPt1.Y) * (modelPt2.Y - modelPt1.Y));
             double ekDist = Math.Sqrt(
                 (ek2x - ek1x) * (ek2x - ek1x) +
-                (ek2y - ek1y) * (ek2y - ek1y));
+                (ek2y - ek1y) * (ek2y - ek1y));   // in fp-space units
+            double ekDist_img = Math.Sqrt(
+                (ek2x_img - ek1x_img) * (ek2x_img - ek1x_img) +
+                (ek2y_img - ek1y_img) * (ek2y_img - ek1y_img));   // in image-pixel units
 
-            if (modelDist < 1.0 || ekDist < 10.0)
+            if (modelDist < 1.0 || ekDist_img < 10.0)
             {
                 TaskDialog.Show("Visual Alignment — Error",
                     "The two reference points are too close together to compute a " +
@@ -3102,12 +3175,61 @@ namespace EkahauRevitPlugin
                 return null;
             }
 
-            double ftPerPx    = modelDist / ekDist;
+            double ftPerPx        = modelDist / ekDist;       // ft per fp-pixel (anchor frame)
+            double ftPerPx_img    = modelDist / ekDist_img;   // ft per bitmap pixel (image placement)
             double modelAngle = Math.Atan2(modelPt2.Y - modelPt1.Y, modelPt2.X - modelPt1.X);
             double ekAngle    = Math.Atan2(-(ek2y - ek1y), ek2x - ek1x);   // Y flip in pixel space
             double rotation   = modelAngle - ekAngle;
             double cosR       = Math.Cos(rotation);
             double sinR       = Math.Sin(rotation);
+
+            // ── 6a. Rotation sanity check (Bug Fix #17, v2.5.22) ───────
+            //   A user reversing the click order produces a rotation
+            //   that's far from 0° (e.g., 208° in the v2.5.21 log).
+            //   Most Ekahau floor plans should align with little or no
+            //   rotation; warn the user if rotation looks suspicious so
+            //   they can re-pick before APs land in the wrong place.
+            double rotDegPre = rotation * 180.0 / Math.PI;
+            // Normalise to (-180, 180]
+            while (rotDegPre >  180) rotDegPre -= 360;
+            while (rotDegPre <= -180) rotDegPre += 360;
+            if (Math.Abs(rotDegPre) > 45)
+            {
+                var rotWarn = new TaskDialog("Unusual Rotation Detected")
+                {
+                    MainInstruction = $"Computed rotation: {rotDegPre:F1}°",
+                    MainContent =
+                        "The visual alignment computed a rotation greater than 45°.  " +
+                        "This usually means the click order got mixed up.\n\n" +
+                        "Make sure you click in this exact order each pair:\n" +
+                        "  1. The point on the REVIT MODEL\n" +
+                        "  2. The SAME point on the EKAHAU IMAGE\n\n" +
+                        "Choose 'Retry' to pick the 4 points again.\n" +
+                        "Choose 'Continue anyway' if the rotation really is correct " +
+                        "(e.g., the floor plan was exported in a different orientation).",
+                };
+                rotWarn.AddCommandLink(TaskDialogCommandLinkId.CommandLink1,
+                    "Retry — re-pick the 4 points");
+                rotWarn.AddCommandLink(TaskDialogCommandLinkId.CommandLink2,
+                    $"Continue anyway with {rotDegPre:F1}° rotation");
+                rotWarn.CommonButtons = TaskDialogCommonButtons.Cancel;
+                rotWarn.DefaultButton = TaskDialogResult.CommandLink1;
+                var rotResp = rotWarn.Show();
+                if (rotResp == TaskDialogResult.CommandLink1)
+                {
+                    DiagLog($"[Visual Cal] User chose to retry after {rotDegPre:F1}° rotation warning.");
+                    goto pickPoints;
+                }
+                if (rotResp == TaskDialogResult.Cancel || rotResp == TaskDialogResult.Close)
+                {
+                    DiagLog($"[Visual Cal] User cancelled after {rotDegPre:F1}° rotation warning.");
+                    DeleteImageInTx(doc, initImgId, "Visual Cal — cancel");
+                    TryDeleteFile(imgPath);
+                    return null;
+                }
+                // Else CommandLink2 — proceed with the unusual rotation.
+                DiagLog($"[Visual Cal] User accepted {rotDegPre:F1}° rotation despite warning.");
+            }
 
             // ── Diagnostic dump (v2.5.20+) ─────────────────────────────
             //   Captured in BOTH DebugView (Debug.WriteLine) AND a file
@@ -3115,29 +3237,35 @@ namespace EkahauRevitPlugin
             //   so the user can share it without setting up DebugView.
             DiagLog(
                 "[Visual Cal] === picks ===\n" +
-                $"  modelPt1 = ({modelPt1.X:F3}, {modelPt1.Y:F3}) ft\n" +
-                $"  modelPt2 = ({modelPt2.X:F3}, {modelPt2.Y:F3}) ft\n" +
-                $"  imagePt1 = ({imagePt1.X:F3}, {imagePt1.Y:F3}) ft\n" +
-                $"  imagePt2 = ({imagePt2.X:F3}, {imagePt2.Y:F3}) ft\n" +
-                $"  ek1 (px) = ({ek1x:F2}, {ek1y:F2})\n" +
-                $"  ek2 (px) = ({ek2x:F2}, {ek2y:F2})\n" +
-                $"  imgPxW   = {imgPxW}, imgPxH = {imgPxH}\n" +
-                $"  fp.Width = {fp.Width:F1}, fp.Height = {fp.Height:F1}\n" +
+                $"  modelPt1     = ({modelPt1.X:F3}, {modelPt1.Y:F3}) ft\n" +
+                $"  modelPt2     = ({modelPt2.X:F3}, {modelPt2.Y:F3}) ft\n" +
+                $"  imagePt1     = ({imagePt1.X:F3}, {imagePt1.Y:F3}) ft\n" +
+                $"  imagePt2     = ({imagePt2.X:F3}, {imagePt2.Y:F3}) ft\n" +
+                $"  ek1 (img px) = ({ek1x_img:F2}, {ek1y_img:F2})\n" +
+                $"  ek2 (img px) = ({ek2x_img:F2}, {ek2y_img:F2})\n" +
+                $"  ek1 (fp px)  = ({ek1x:F2}, {ek1y:F2})\n" +
+                $"  ek2 (fp px)  = ({ek2x:F2}, {ek2y:F2})\n" +
+                $"  imgPxW       = {imgPxW}, imgPxH = {imgPxH}\n" +
+                $"  fp.Width     = {fp.Width:F1}, fp.Height = {fp.Height:F1}\n" +
+                $"  scale img→fp = ({scaleImgToFpX:F4}, {scaleImgToFpY:F4})\n" +
                 $"  fp.MetersPerUnit = {fp.MetersPerUnit:F6}");
             DiagLog(
                 "[Visual Cal] === computed transform ===\n" +
-                $"  modelDist = {modelDist:F3} ft, modelAngle = {modelAngle * 180.0 / Math.PI:F2}°\n" +
-                $"  ekDist    = {ekDist:F2} px, ekAngle    = {ekAngle * 180.0 / Math.PI:F2}°\n" +
-                $"  rotation  = {rotation * 180.0 / Math.PI:F2}°\n" +
-                $"  ftPerPx   = {ftPerPx:F6} (ft per bitmap pixel)\n" +
+                $"  modelDist     = {modelDist:F3} ft, modelAngle = {modelAngle * 180.0 / Math.PI:F2}°\n" +
+                $"  ekDist (fp)   = {ekDist:F2} px,  ekAngle    = {ekAngle * 180.0 / Math.PI:F2}°\n" +
+                $"  ekDist (img)  = {ekDist_img:F2} px\n" +
+                $"  rotation      = {rotation * 180.0 / Math.PI:F2}°\n" +
+                $"  ftPerPx (fp)  = {ftPerPx:F6}  (ft per fp-pixel — anchor frame)\n" +
+                $"  ftPerPx (img) = {ftPerPx_img:F6}  (ft per bitmap-pixel — image placement)\n" +
                 $"  cosR = {cosR:F4}, sinR = {sinR:F4}");
 
-            // Sanity check vs declared metersPerUnit
+            // Sanity check vs declared metersPerUnit (compare in fp space:
+            // both fp.MetersPerUnit and our ftPerPx are per-fp-pixel)
             double mpuFtPerPx = mpu / 0.3048;
             double scaleErr   = mpuFtPerPx > 0
                 ? Math.Abs(ftPerPx - mpuFtPerPx) / mpuFtPerPx : 0;
 
-            // Verify Pair-2 residual
+            // Verify Pair-2 residual (in fp space)
             double dx2 = ek2x - ek1x, dy2 = -(ek2y - ek1y);
             double checkX = modelPt1.X + (dx2 * cosR - dy2 * sinR) * ftPerPx;
             double checkY = modelPt1.Y + (dx2 * sinR + dy2 * cosR) * ftPerPx;
@@ -3147,16 +3275,20 @@ namespace EkahauRevitPlugin
             double rotDeg = rotation * 180.0 / Math.PI;
 
             Debug.WriteLine(
-                $"[ESX Read] Visual cal: ftPerPx={ftPerPx:F6} rot={rotDeg:F2}° " +
-                $"residual={resFt:F3} ft  scale-err-vs-mpu={scaleErr * 100:F1}%");
+                $"[ESX Read] Visual cal: ftPerPx_fp={ftPerPx:F6} ftPerPx_img={ftPerPx_img:F6} " +
+                $"rot={rotDeg:F2}° residual={resFt:F3} ft  scale-err-vs-mpu={scaleErr * 100:F1}%");
 
-            // ── 7. Reposition + rotate the image ────────────────────
-            //   Pixel (imgPxW/2, imgPxH/2) → world via the calibrated transform
-            double cdx = (imgPxW / 2.0) - ek1x;
-            double cdy = -((imgPxH / 2.0) - ek1y);
-            double newCenterX = modelPt1.X + (cdx * cosR - cdy * sinR) * ftPerPx;
-            double newCenterY = modelPt1.Y + (cdx * sinR + cdy * cosR) * ftPerPx;
-            double newWidthFt = imgPxW * ftPerPx;
+            // ── 7. Reposition + rotate the image (in IMAGE-pixel space) ──
+            //   The image we re-place has imgPxW × imgPxH bitmap pixels,
+            //   so its physical width = imgPxW * ftPerPx_img.  Use the
+            //   image-space pick (ek1x_img, ek1y_img) and ftPerPx_img to
+            //   compute the centre — same math as before v2.5.22, just
+            //   with explicit unit suffixes.
+            double cdx = (imgPxW / 2.0) - ek1x_img;
+            double cdy = -((imgPxH / 2.0) - ek1y_img);
+            double newCenterX = modelPt1.X + (cdx * cosR - cdy * sinR) * ftPerPx_img;
+            double newCenterY = modelPt1.Y + (cdx * sinR + cdy * cosR) * ftPerPx_img;
+            double newWidthFt = imgPxW * ftPerPx_img;
 
             ElementId alignedImgId = null;
             try
@@ -3239,21 +3371,36 @@ namespace EkahauRevitPlugin
                 return null;
 
             // ── 9. Build EsxRevitAnchorData (Mode 1, with rotation) ──
+            //   v2.5.22 (Bug Fix #17): the synthesised anchor lives in
+            //   FP-SPACE (fp.Width × fp.Height), the SAME coordinate
+            //   system AP coordinates use in the .esx.  This eliminates
+            //   the apScale conversion that v2.5.19 needed when the
+            //   anchor was stored in image-pixel-space.  Now AP coords
+            //   flow straight through BuildEkahauToRevitXform without
+            //   any unit-conversion step.
+            //
             //   The Mode-1 transform builder applies:
             //       vx = lMinX + (ex - offX) / cW * cropW
             //       vy = lMaxY - (ey - offY) / cH * cropH
             //       wx = oX + bXx * vx + bYx * vy
             //       wy = oY + bXy * vx + bYy * vy
-            //   We pick the local + basis fields so this evaluates to
-            //   exactly our visual-alignment formula:
-            //       wx = anchorRevitX + (dx*cosR - dy*sinR) * ftPerPx
-            //       wy = anchorRevitY + (dx*sinR + dy*cosR) * ftPerPx
-            //   where dx = ex - anchorEkX, dy = -(ey - anchorEkY).
-            double anchorEkX = ek1x, anchorEkY = ek1y;
+            //   With cW = fp.Width and Local* in fp-space, vx evaluates
+            //   to exactly (ex - anchorEkX) * ftPerPx_fp, matching our
+            //   visual-alignment formula.
+            //
+            //   ImageWidth/Height continue to record the actual bitmap
+            //   pixel dimensions (used by PlaceFloorPlanImage along with
+            //   CropPixelWidth to compute the correct physical image
+            //   size — see the PlaceFloorPlanImage v2.5.22 update).
+            double anchorEkX = ek1x, anchorEkY = ek1y;     // in fp-space
             double anchorRX  = modelPt1.X, anchorRY = modelPt1.Y;
+            double cropW_fp = fp.Width  > 0 ? fp.Width  : imgPxW;
+            double cropH_fp = fp.Height > 0 ? fp.Height : imgPxH;
 
-            // World-space AABB for informational fields (not used by Mode 1
-            // but populated for completeness and downstream logging).
+            // World-space AABB — computed by transforming the 4 corners
+            // of the FP-SPACE rectangle (0..fp.Width, 0..fp.Height) via
+            // the calibrated transform.  PlaceFloorPlanImage uses this
+            // AABB to choose the placement centre.
             double minWX = double.MaxValue, maxWX = double.MinValue;
             double minWY = double.MaxValue, maxWY = double.MinValue;
             void TransformPx(double px, double py)
@@ -3267,26 +3414,23 @@ namespace EkahauRevitPlugin
                 if (wy < minWY) minWY = wy;
                 if (wy > maxWY) maxWY = wy;
             }
-            TransformPx(0, 0);
-            TransformPx(imgPxW, 0);
-            TransformPx(imgPxW, imgPxH);
-            TransformPx(0, imgPxH);
+            TransformPx(0,        0);
+            TransformPx(cropW_fp, 0);
+            TransformPx(cropW_fp, cropH_fp);
+            TransformPx(0,        cropH_fp);
 
             DiagLog(
-                "[Visual Cal] === synthesised anchor ===\n" +
-                $"  CropWorld   = ({minWX:F2}..{maxWX:F2}, {minWY:F2}..{maxWY:F2}) ft\n" +
-                $"  CropPixel   = ({imgPxW}x{imgPxH})  (anchor frame)\n" +
-                $"  ImageWidth  = {imgPxW}, ImageHeight = {imgPxH}\n" +
-                $"  anchorEk    = ({anchorEkX:F2}, {anchorEkY:F2}) px\n" +
-                $"  anchorR     = ({anchorRX:F3}, {anchorRY:F3}) ft\n" +
-                $"  Local       = ({-anchorEkX * ftPerPx:F2}..{(imgPxW - anchorEkX) * ftPerPx:F2}, " +
-                $"{-(imgPxH - anchorEkY) * ftPerPx:F2}..{anchorEkY * ftPerPx:F2}) ft\n" +
-                $"  Basis       = [{cosR:F4} {sinR:F4}; {-sinR:F4} {cosR:F4}]\n" +
-                $"  MetersPerUnit (synthesised) = {ftPerPx * 0.3048:F6} m/px\n" +
-                $"  fp.Width = {fp.Width:F1}, fp.Height = {fp.Height:F1}\n" +
-                $"  expected apScale (in BuildEkahauToRevitXform) = " +
-                $"({(fp.Width  > 0 ? imgPxW / fp.Width  : 1.0):F4}x" +
-                $"{(fp.Height > 0 ? imgPxH / fp.Height : 1.0):F4})");
+                "[Visual Cal] === synthesised anchor (Option A: fp-space) ===\n" +
+                $"  CropWorld     = ({minWX:F2}..{maxWX:F2}, {minWY:F2}..{maxWY:F2}) ft\n" +
+                $"  CropPixel     = ({cropW_fp:F1}x{cropH_fp:F1})  (anchor frame = fp-space)\n" +
+                $"  ImageWidth    = {imgPxW}, ImageHeight = {imgPxH}  (actual bitmap pixels)\n" +
+                $"  anchorEk      = ({anchorEkX:F2}, {anchorEkY:F2}) fp-px\n" +
+                $"  anchorR       = ({anchorRX:F3}, {anchorRY:F3}) ft\n" +
+                $"  Local         = ({-anchorEkX * ftPerPx:F2}..{(cropW_fp - anchorEkX) * ftPerPx:F2}, " +
+                $"{-(cropH_fp - anchorEkY) * ftPerPx:F2}..{anchorEkY * ftPerPx:F2}) ft\n" +
+                $"  Basis         = [{cosR:F4} {sinR:F4}; {-sinR:F4} {cosR:F4}]\n" +
+                $"  MetersPerUnit = {ftPerPx * 0.3048:F6} m/fp-px (synthesised, was per bitmap-px before v2.5.22)\n" +
+                $"  expected apScale in BuildEkahauToRevitXform = (1.0000x1.0000) — fp-space anchor + fp-space AP coords");
 
             return new EsxRevitAnchorData
             {
@@ -3295,19 +3439,23 @@ namespace EkahauRevitPlugin
                 CropWorldMaxX_ft = maxWX,
                 CropWorldMaxY_ft = maxWY,
 
+                // mpu is now "meters per fp-space pixel" (was "meters per
+                // bitmap pixel" before v2.5.22).  PlaceFloorPlanImage was
+                // updated to use CropPixelWidth (= fp.Width) instead of
+                // the file's actual pixel dimensions, so this is the
+                // correct unit for both AP placement AND image sizing.
                 MetersPerUnit    = ftPerPx * 0.3048,
-                ImageWidth       = imgPxW,
+                ImageWidth       = imgPxW,    // actual bitmap pixels (informational)
                 ImageHeight      = imgPxH,
                 CropPixelOffsetX = 0,
                 CropPixelOffsetY = 0,
-                CropPixelWidth   = imgPxW,
-                CropPixelHeight  = imgPxH,
+                CropPixelWidth   = cropW_fp,  // fp-space (= fp.Width when set)
+                CropPixelHeight  = cropH_fp,
 
-                // Local bounds (chosen so vx = (ex - anchorEkX)*ftPerPx,
-                // vy = (anchorEkY - ey)*ftPerPx — see the maths above).
+                // Local bounds in fp-space + ftPerPx_fp (so vx = (ex - anchorEkX) * ftPerPx_fp).
                 LocalMinX = -anchorEkX * ftPerPx,
-                LocalMaxX = (imgPxW - anchorEkX) * ftPerPx,
-                LocalMinY = -(imgPxH - anchorEkY) * ftPerPx,
+                LocalMaxX = (cropW_fp - anchorEkX) * ftPerPx,
+                LocalMinY = -(cropH_fp - anchorEkY) * ftPerPx,
                 LocalMaxY = anchorEkY * ftPerPx,
 
                 XformOriginX_ft = anchorRX,

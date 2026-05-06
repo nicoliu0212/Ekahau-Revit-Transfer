@@ -5,6 +5,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.5.22] — 2026-05-05
+
+### Fixed (Bug Fix #17)
+- **Visual-cal synthesised anchor now lives in fp-space (`fp.Width × fp.Height`) — the same coordinate system AP coords use.** v2.5.19 stored the anchor in image-pixel-space (`imgPxW × imgPxH`) and bridged the gap with an `apScale` conversion in `BuildEkahauToRevitXform`. The math was correct, but the two-coordinate-systems design was confusing and made future bugs harder to diagnose. v2.5.22 keeps everything in fp-space throughout, so AP coords flow straight through the transform with no scaling conversion.
+- **Rotation sanity check** — when the visual cal computes a rotation greater than 45° (the v2.5.21 log had one attempt at 208° because the user reversed the click order), the user now sees a clear "Unusual Rotation Detected" dialog with three options: Retry / Continue anyway / Cancel. Previously a wrong-order pick would silently produce a wildly wrong calibration.
+
+### Changed
+- `EsxRevitAnchorData` semantics for visual-cal-synthesised anchors:
+  - `CropPixelWidth/Height` = `fp.Width × fp.Height` (fp-space, matches AP coord units)
+  - `ImageWidth/Height` = actual bitmap pixel dimensions (informational only)
+  - `MetersPerUnit` = "meters per fp-pixel" (was "meters per bitmap pixel" before v2.5.22)
+  - `LocalMin/Max` = computed in fp-space using fp-space `ftPerPx`
+  - `XformBasis` = unchanged (rotation is coordinate-space-invariant)
+- `EsxMarkerOps.PlaceFloorPlanImage` now computes image dimensions from `anchor.CropPixelWidth × ftPerPx` instead of `actualPixelW × ftPerPx`. For ESX-Export anchors (where `ImageWidth ≈ CropPixelWidth ≈ fp.Width`) the result is identical to the old formula. For Option A visual-cal anchors (where `CropPixelWidth = fp.Width` but `ImageWidth = bitmap pixel width`) it gives the correct physical width.
+- `PlaceFloorPlanImage`'s padding-compensation block now skips itself when `CropPixel` and `ImageWidth/Height` are in different coordinate spaces (the Option A case) — the AABB-based centre is already correct in that case.
+- `BuildEkahauToRevitXform` Mode 1's `apScale` (added in v2.5.19) becomes `1.0` for Option A anchors (because `cW = fp.Width` so the ratio is 1) — kept in place for backward compatibility with any legacy anchors that might still be in the wild.
+
+### Added
+- Diagnostic log now records BOTH image-space `(ek1_img, ek2_img)` AND fp-space `(ek1, ek2)` picks plus the conversion ratio, so it's instantly clear which space each number lives in.
+- `[Visual Cal] === computed transform ===` log now records both `ftPerPx (fp)` and `ftPerPx (img)` separately.
+- The synthesised-anchor log line shows `expected apScale = (1.0000x1.0000)` to confirm Option A is in effect.
+
+### Why this is the right design
+v2.5.19's apScale fix produced mathematically correct AP positions, but mixing two coordinate systems through the same data structure is the kind of design choice that bites later. Option A puts a hard line at one boundary: image placement uses image-pixel-space, AP coordinate transformation uses fp-space, the two never meet inside the same calculation. If a future bug appears in one path, the other can't be implicated.
+
 ## [2.5.21] — 2026-05-05
 
 ### Added
