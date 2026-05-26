@@ -5,6 +5,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.6.1] — 2026-05-26
+
+### Changed
+- **Nudge is now available in EVERY mode** (was Manual-Align-only since v2.5.26). Even with a valid `revitAnchor`, Ekahau-rendered bitmaps often include sheet borders / title blocks / whitespace that shift the floor-plan content within the bitmap — so AP positions are mathematically correct relative to the bitmap but visually misaligned relative to the Revit walls the user uses as their reference. Nudge gives a guaranteed manual correction in all three modes (Quick / Align / legacy Read).
+- **Nudge can now be applied multiple times in a row.** After each successful nudge, the "AP Position Check" dialog re-opens so the user can do another round (or another, or another) until APs land where they should. Each round's offset stacks on top of the previous. The dialog title shows `(round 2)`, `(round 3)`, etc. so it's clear how many corrections have been applied. "Looks good now — continue" exits the loop.
+
+### Why
+Inspection of the user's `.esx` revealed the underlying root cause: the bitmap (`image-beeceb21-…`, 5000×3571 JPEG) isn't just a floor plan — it's a full Revit Sheet with title block on the right, notes block at top, and the actual floor plan in the center-left area. `floorPlans.json` has `cropMinX/Y..cropMaxX/Y = (153, 849)..(2749, 1962)` in fp-space units (5%..91% horizontal, 39%..91% vertical of fp.Width × fp.Height), which is the visible floor-plan region. AP coords are in fp-space relative to the **full sheet**, not relative to the crop region — so they map mathematically correctly onto the bitmap, but the user visually compares AP markers to **Revit walls** (which fill the Revit view) rather than to the **bitmap's floor-plan area** (which is only ~50% of the bitmap). The discrepancy looks like a misalignment when it's actually a reference-frame mismatch.
+
+A future release will probably crop the bitmap to the `cropMin/Max` region before placing it (so the image you see in Revit is just the floor plan, with no title block), removing the reference-frame ambiguity. For now, repeat-Nudge is the immediate workaround that puts APs where the user expects regardless of how the bitmap was rendered.
+
+### Diagnostic
+DiagLog records every nudge round, e.g.:
+```
+[ESX Read] Nudge offset: (5.32, -1.78) ft = (1.62, -0.54) m, distance = 5.61 ft
+[ESX Read] Nudge applied: moved 1080 elements, skipped 0.
+[ESX Read] Nudge offset: (-0.84, 0.31) ft = (-0.26, 0.09) m, distance = 0.89 ft
+[ESX Read] Nudge applied: moved 1080 elements, skipped 0.
+```
+
 ## [2.6.0] — 2026-05-15
 
 ### Changed — ESX Read split into two focused workflows

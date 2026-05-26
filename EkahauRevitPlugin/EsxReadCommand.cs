@@ -2476,32 +2476,52 @@ namespace EkahauRevitPlugin
                 //   a single transaction.  Staging entries are also updated
                 //   so AP Place / staging JSON reflect the corrected positions.
                 //
-                //   v2.6.0: Quick Import skips this dialog too — round-
-                //   trip anchors are trusted to land APs correctly so
-                //   there's no offset to nudge away.  Users who want to
-                //   apply a nudge after Quick Import can move markers
-                //   manually and re-export the staging via a future
-                //   feature (or just re-run with Manual Align).
-                if (stagingFloor.AccessPoints.Count > 0 && Mode != EsxReadMode.Quick)
+                //   v2.6.1: Nudge is now available in ALL modes (was
+                //   skipped in Quick before).  Reason: even with valid
+                //   revitAnchor data, the bitmap rendered by Ekahau may
+                //   include sheet borders / title blocks / whitespace
+                //   that shift the floor plan content within the
+                //   bitmap.  AP coords map to fp-space positions that
+                //   are mathematically correct relative to the bitmap,
+                //   but the user's reference is the Revit walls — and
+                //   the bitmap's floor-plan-content offset can cause a
+                //   visual mismatch.  Nudge gives users a guaranteed
+                //   per-floor manual correction in every mode.
+                if (stagingFloor.AccessPoints.Count > 0)
                 {
                     progress.Hide();
                     DoEvents();
+                    int nudgeRound = 0;
+                    bool nudgeOuterDone = false;
+                    while (!nudgeOuterDone)
                     try
                     {
-                        var nudgeDlg = new TaskDialog("ESX Read — AP Position Check")
+                        nudgeRound++;
+                        string roundSuffix = nudgeRound > 1
+                            ? $" (round {nudgeRound})"
+                            : "";
+                        var nudgeDlg = new TaskDialog($"ESX Read — AP Position Check{roundSuffix}")
                         {
-                            MainInstruction = "Are the AP markers at the correct positions?",
+                            MainInstruction = nudgeRound == 1
+                                ? "Are the AP markers at the correct positions?"
+                                : "Still offset? You can nudge again.",
                             MainContent =
                                 "Compare the AP crosshair markers to the AP icons visible " +
                                 "in the placed floor plan image.\n\n" +
                                 "If they're systematically offset (e.g., shifted 5 ft south), " +
                                 "you can correct ALL markers at once by clicking where ONE " +
-                                "known AP currently is and then where it should actually be.",
+                                "known AP currently is and then where it should actually be.\n\n" +
+                                "v2.6.1: you can repeat this as many times as you need — " +
+                                "each nudge stacks on top of the previous one.",
                         };
                         nudgeDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink1,
-                            "Positions are correct — continue");
+                            nudgeRound == 1
+                                ? "Positions are correct — continue"
+                                : "Looks good now — continue");
                         nudgeDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink2,
-                            "Markers are offset — correct positions",
+                            nudgeRound == 1
+                                ? "Markers are offset — correct positions"
+                                : "Apply another nudge",
                             "Click an AP marker, then click where it should actually be. " +
                             "All markers shift by the same delta.");
                         nudgeDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink3,
@@ -2605,10 +2625,22 @@ namespace EkahauRevitPlugin
                                 }
                                 else if (confirmResp == TaskDialogResult.CommandLink3)
                                 {
+                                    // User cancelled the correction —
+                                    // exit both inner and outer loops.
                                     nudgeDone = true;
+                                    nudgeOuterDone = true;
                                 }
                                 // CommandLink2 (try again) → loop back, re-pick
                             }
+                            // v2.6.1: after applying a nudge, the outer
+                            // loop re-shows the dialog so the user can
+                            // assess whether another nudge is needed.
+                            // Do NOT set nudgeOuterDone here.
+                        }
+                        else if (nudgeResp == TaskDialogResult.CommandLink1)
+                        {
+                            // "Positions are correct — continue" → done.
+                            nudgeOuterDone = true;
                         }
                         else if (nudgeResp == TaskDialogResult.CommandLink3)
                         {
@@ -2624,11 +2656,18 @@ namespace EkahauRevitPlugin
                                     "in the view AND in the staging data.");
                             }
                             catch { }
+                            nudgeOuterDone = true;
+                        }
+                        else
+                        {
+                            // Closed via the X button / Cancel / Escape — done.
+                            nudgeOuterDone = true;
                         }
                     }
                     catch (Exception ex)
                     {
                         DiagLog($"[ESX Read] Nudge dialog flow failed: {ex.Message}");
+                        nudgeOuterDone = true;
                     }
                     progress.Show();
                     DoEvents();
