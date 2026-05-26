@@ -2520,11 +2520,20 @@ namespace EkahauRevitPlugin
                                 : "Looks good now — continue");
                         nudgeDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink2,
                             nudgeRound == 1
-                                ? "Markers are offset — correct positions"
-                                : "Apply another nudge",
+                                ? "Translation only — markers offset (2 clicks)"
+                                : "Apply another translation nudge",
                             "Click an AP marker, then click where it should actually be. " +
-                            "All markers shift by the same delta.");
+                            "All markers shift by the same delta. Use this when APs look " +
+                            "rotated correctly but shifted by a uniform offset.");
                         nudgeDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink3,
+                            nudgeRound == 1
+                                ? "Translation + rotation — full re-align (4 clicks)"
+                                : "Apply another full re-align",
+                            "Click 2 PAIRS (4 points): (current AP #1 → target AP #1), " +
+                            "(current AP #2 far from #1 → target AP #2).  All markers " +
+                            "rotate + translate together.  Use this when APs are not " +
+                            "just shifted but also rotated (e.g., 90° off).");
+                        nudgeDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink4,
                             "Skip — I'll move markers manually",
                             "Select and move markers in Revit yourself before running AP Place.");
                         nudgeDlg.DefaultButton = TaskDialogResult.CommandLink1;
@@ -2637,12 +2646,181 @@ namespace EkahauRevitPlugin
                             // assess whether another nudge is needed.
                             // Do NOT set nudgeOuterDone here.
                         }
+                        else if (nudgeResp == TaskDialogResult.CommandLink3)
+                        {
+                            // v2.6.2: 4-click full re-align (translation + rotation)
+                            bool nudgeDone = false;
+                            while (!nudgeDone)
+                            {
+                                XYZ cur1 = null, tgt1 = null, cur2 = null, tgt2 = null;
+                                try
+                                {
+                                    cur1 = uiDoc.Selection.PickPoint(
+                                        "PAIR 1 / step 1 — click an existing AP marker (where it IS now)");
+                                    tgt1 = uiDoc.Selection.PickPoint(
+                                        "PAIR 1 / step 2 — click where that AP SHOULD BE on the image");
+                                    cur2 = uiDoc.Selection.PickPoint(
+                                        "PAIR 2 / step 1 — click another AP marker FAR from the first (where it IS now)");
+                                    tgt2 = uiDoc.Selection.PickPoint(
+                                        "PAIR 2 / step 2 — click where that AP SHOULD BE on the image");
+                                }
+                                catch (Autodesk.Revit.Exceptions.OperationCanceledException)
+                                {
+                                    DiagLog("[ESX Read] User cancelled 4-click re-align — skipping correction.");
+                                    nudgeDone = true;
+                                    break;
+                                }
+
+                                double dxCur = cur2.X - cur1.X;
+                                double dyCur = cur2.Y - cur1.Y;
+                                double dxTgt = tgt2.X - tgt1.X;
+                                double dyTgt = tgt2.Y - tgt1.Y;
+                                double distCur = Math.Sqrt(dxCur * dxCur + dyCur * dyCur);
+                                double distTgt = Math.Sqrt(dxTgt * dxTgt + dyTgt * dyTgt);
+
+                                if (distCur < 0.5 || distTgt < 0.5)
+                                {
+                                    try
+                                    {
+                                        TaskDialog.Show("Re-align — picks too close",
+                                            "PAIR 1 and PAIR 2 must be far apart to compute a stable " +
+                                            "rotation.  Try again and pick AP markers on opposite ends " +
+                                            "of the floor plan.");
+                                    }
+                                    catch { }
+                                    continue;
+                                }
+
+                                double angleCur = Math.Atan2(dyCur, dxCur);
+                                double angleTgt = Math.Atan2(dyTgt, dxTgt);
+                                double rotation = angleTgt - angleCur;
+                                // Normalise to (-180°, 180°] so the dialog reads sensibly.
+                                double rotDeg = rotation * 180.0 / Math.PI;
+                                while (rotDeg >  180) rotDeg -= 360;
+                                while (rotDeg <= -180) rotDeg += 360;
+                                rotation = rotDeg * Math.PI / 180.0;
+
+                                double scale = distTgt / distCur;
+                                double translateX = tgt1.X - cur1.X;
+                                double translateY = tgt1.Y - cur1.Y;
+
+                                DiagLog($"[ESX Read] 4-click re-align: rotation = {rotDeg:F2}°, " +
+                                        $"scale = {scale:F3}, translate after rotate = " +
+                                        $"({translateX:F2}, {translateY:F2}) ft, " +
+                                        $"pivot = ({cur1.X:F2}, {cur1.Y:F2}) ft");
+
+                                string scaleNote = Math.Abs(scale - 1.0) > 0.10
+                                    ? $"  ⚠  scale differs from 1.0 by {Math.Abs(scale - 1.0) * 100:F0}% — " +
+                                      "marker shapes won't scale (only positions move)"
+                                    : "  OK";
+
+                                var confirmDlg = new TaskDialog("Confirm Re-align")
+                                {
+                                    MainInstruction = $"Apply rotation {rotDeg:F2}° + translation to all {stagingFloor.AccessPoints.Count} AP markers?",
+                                    MainContent =
+                                        $"Rotation:    {rotDeg:F2}°\n" +
+                                        $"Translation: ({translateX:F2}, {translateY:F2}) ft  (after rotation around AP #1 click)\n" +
+                                        $"Scale:       {scale:F3}{scaleNote}\n\n" +
+                                        $"All AP marker elements (circles + crosses + labels) will rotate " +
+                                        $"around AP #1 by the angle above, then translate to land AP #1 on " +
+                                        $"its target.  Marker shapes do not scale — only positions move.",
+                                };
+                                confirmDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink1,
+                                    "Apply — re-align all markers");
+                                confirmDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink2,
+                                    "Try again — pick different points");
+                                confirmDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink3,
+                                    "Cancel correction");
+                                confirmDlg.DefaultButton = TaskDialogResult.CommandLink1;
+                                var confirmResp = confirmDlg.Show();
+
+                                if (confirmResp == TaskDialogResult.CommandLink1)
+                                {
+                                    int moved = 0;
+                                    try
+                                    {
+                                        using var realignTx = new Transaction(doc, "ESX Read — Re-align AP markers");
+                                        realignTx.Start();
+
+                                        var allMarkerIds = new List<ElementId>();
+                                        foreach (var apEntry in stagingFloor.AccessPoints)
+                                        {
+                                            foreach (var markerLongId in apEntry.MarkerElementIds)
+                                            {
+                                                try
+                                                {
+                                                    var eid = VersionCompat.MakeId(markerLongId);
+                                                    var elem = doc.GetElement(eid);
+                                                    if (elem != null && !(elem is ImageInstance))
+                                                        allMarkerIds.Add(eid);
+                                                }
+                                                catch { }
+                                            }
+                                        }
+                                        moved = allMarkerIds.Count;
+
+                                        if (allMarkerIds.Count > 0)
+                                        {
+                                            // 1. Rotate around vertical axis through cur1.
+                                            if (Math.Abs(rotation) > 1e-5)
+                                            {
+                                                var axis = Line.CreateBound(
+                                                    new XYZ(cur1.X, cur1.Y, cur1.Z),
+                                                    new XYZ(cur1.X, cur1.Y, cur1.Z + 1));
+                                                ElementTransformUtils.RotateElements(doc, allMarkerIds, axis, rotation);
+                                            }
+                                            // 2. Translate by (tgt1 - cur1) so cur1 lands at tgt1.
+                                            var transVec = new XYZ(translateX, translateY, 0);
+                                            if (transVec.GetLength() > 1e-6)
+                                                ElementTransformUtils.MoveElements(doc, allMarkerIds, transVec);
+                                        }
+
+                                        // Update staging WorldX/Y so downstream tools see the
+                                        // corrected positions.  Apply the same rotate-around-cur1
+                                        // + translate to each AP's stored world coords.
+                                        double cosR = Math.Cos(rotation);
+                                        double sinR = Math.Sin(rotation);
+                                        foreach (var apEntry in stagingFloor.AccessPoints)
+                                        {
+                                            double rx = apEntry.WorldX - cur1.X;
+                                            double ry = apEntry.WorldY - cur1.Y;
+                                            double newRx = rx * cosR - ry * sinR;
+                                            double newRy = rx * sinR + ry * cosR;
+                                            apEntry.WorldX = cur1.X + newRx + translateX;
+                                            apEntry.WorldY = cur1.Y + newRy + translateY;
+                                        }
+
+                                        realignTx.Commit();
+                                        DiagLog($"[ESX Read] Re-align applied: {moved} elements transformed.");
+                                    }
+                                    catch (Exception realignEx)
+                                    {
+                                        DiagLog($"[ESX Read] Re-align transaction failed: {realignEx.Message}");
+                                        try
+                                        {
+                                            TaskDialog.Show("Re-align failed",
+                                                $"Could not apply re-align:\n{realignEx.Message}");
+                                        }
+                                        catch { }
+                                    }
+                                    nudgeDone = true;
+                                }
+                                else if (confirmResp == TaskDialogResult.CommandLink3)
+                                {
+                                    nudgeDone = true;
+                                    nudgeOuterDone = true;
+                                }
+                                // CommandLink2 (try again) → loop back, re-pick.
+                            }
+                            // After re-align (or skip), re-enter outer loop so user
+                            // can do another round if needed.
+                        }
                         else if (nudgeResp == TaskDialogResult.CommandLink1)
                         {
                             // "Positions are correct — continue" → done.
                             nudgeOuterDone = true;
                         }
-                        else if (nudgeResp == TaskDialogResult.CommandLink3)
+                        else if (nudgeResp == TaskDialogResult.CommandLink4)
                         {
                             try
                             {

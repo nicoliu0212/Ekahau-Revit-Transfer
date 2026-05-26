@@ -5,6 +5,51 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.6.2] — 2026-05-26
+
+### Added — Full 4-click re-align (translation + rotation)
+The single-point Nudge fixed pure-translation offsets, but the user reported a case where APs are simultaneously **translated AND rotated 90°** — Nudge alone can't fix that.
+
+The `AP Position Check` dialog now has FOUR options instead of three:
+
+1. **Positions are correct — continue** (existing)
+2. **Translation only — markers offset (2 clicks)** ← the existing Nudge
+3. **Translation + rotation — full re-align (4 clicks)** ← NEW
+4. **Skip — I'll move markers manually** (existing)
+
+The new 4-click flow:
+- Click **PAIR 1 / step 1** — an existing AP marker (where it IS now)
+- Click **PAIR 1 / step 2** — where that AP SHOULD BE
+- Click **PAIR 2 / step 1** — another AP marker, far from PAIR 1 (where it IS now)
+- Click **PAIR 2 / step 2** — where that AP SHOULD BE
+
+From the two pairs the plugin computes:
+- **rotation** = `atan2(PAIR 2 target delta) - atan2(PAIR 2 current delta)`
+- **translation** = `tgt1 - cur1`
+- **scale** = `|tgt2-tgt1| / |cur2-cur1|` (informational only — marker shapes are not scaled, scale warning shown if ≠ 1.0 ±10%)
+
+Then in a single Revit transaction:
+1. `ElementTransformUtils.RotateElements(..., axis through cur1, rotation)` — rotates every marker around the first picked point
+2. `ElementTransformUtils.MoveElements(..., tgt1 - cur1)` — translates everything so cur1 lands on tgt1
+3. Each `ApStagingEntry.WorldX/Y` is updated by the same transform so AP Place sees the corrected coords
+
+### Same outer-loop repeat as v2.6.1
+After applying either Nudge or Re-align, the outer `AP Position Check` dialog re-opens so you can:
+- Continue with another translation Nudge
+- Continue with another full Re-align (e.g., if the first one over-rotated)
+- Or mix and match: Re-align to get the rotation right, then Nudge to fine-tune translation
+
+Each round's diagnostic is recorded:
+```
+[ESX Read] 4-click re-align: rotation = -90.00°, scale = 1.005,
+           translate after rotate = (12.45, -3.21) ft,
+           pivot = (-263.25, -697.18) ft
+[ESX Read] Re-align applied: 1080 elements transformed.
+```
+
+### Limitations
+- **Scale** is computed but NOT applied — marker shapes stay at their original radii. If the scale is wildly off (e.g., 1.5×), Re-align won't fix that; you'd need to re-do the visual cal with better pair-2 distance. The confirm dialog flags this with a `⚠` when scale is more than ±10% off.
+
 ## [2.6.1] — 2026-05-26
 
 ### Changed
