@@ -1707,10 +1707,51 @@ namespace EkahauRevitPlugin
     //  ESX Read Command — Main entry point
     // ══════════════════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// Workflow mode for <see cref="EsxReadCommand"/> — v2.6.0 split the
+    /// single "ESX Read" button into two focused tools while keeping the
+    /// original as a legacy router.  Each mode skips or runs different
+    /// alignment dialogs:
+    ///
+    /// <list type="bullet">
+    /// <item><c>LegacyAuto</c> — original behaviour.  Runs every alignment
+    ///   dialog (image-verify, manual two-point, rotation picker, nudge).
+    ///   Kept so the existing "ESX Read" ribbon button doesn't change
+    ///   behaviour for users with muscle memory.</item>
+    /// <item><c>Quick</c> — round-trip import: assumes the .esx came from
+    ///   "ESX Export" and already has a valid <c>revitAnchor</c> per floor.
+    ///   Places the image overlay (Option B: no verification dialog) and
+    ///   the APs at the anchored positions, then stops.  Skips manual
+    ///   alignment, rotation picker, and Nudge.  Floors WITHOUT an anchor
+    ///   are skipped with a warning per the v2.6.0 design ("mixed .esx →
+    ///   warn user").</item>
+    /// <item><c>Align</c> — external Ekahau project: runs the full visual-
+    ///   alignment flow even when an anchor is present.  Pre-flight check
+    ///   suggests switching to Quick when all floors are already anchored
+    ///   so users don't waste time.</item>
+    /// </list>
+    /// </summary>
+    public enum EsxReadMode
+    {
+        LegacyAuto,
+        Quick,
+        Align,
+    }
+
     [Transaction(TransactionMode.Manual)]
     public class EsxReadCommand : IExternalCommand
     {
         private const double FeetToMetres = 0.3048;
+
+        /// <summary>
+        /// Which alignment dialogs to run.  Default is <c>LegacyAuto</c>
+        /// (everything — preserves the pre-v2.6.0 behaviour of this
+        /// command class).  The two new wrapper commands
+        /// (<see cref="EsxReadQuickCommand"/> and
+        /// <see cref="EsxReadAlignCommand"/>) construct an instance and
+        /// set this property before calling <see cref="Execute"/>.
+        /// </summary>
+        public EsxReadMode Mode { get; set; } = EsxReadMode.LegacyAuto;
 
         public Result Execute(ExternalCommandData commandData,
             ref string message, ElementSet elements)
@@ -1759,6 +1800,73 @@ namespace EkahauRevitPlugin
             //       .ekahau-cal.json sidecar that DWG Export wrote next
             //       to the .dwg.  Apply it to all anchorless floor plans.
             TryApplyDwgCalibrationFallback(esxData, esxPath);
+
+            // ── 2c. v2.6.0 — Mode pre-flight check ─────────────────────
+            //   Quick mode requires revitAnchor on the floors it'll
+            //   process.  Align mode is overkill when every floor already
+            //   has an anchor.  Warn the user when their selected mode
+            //   doesn't match the .esx contents so they can switch tools.
+            int totalFloors  = esxData.FloorPlans.Count;
+            int withAnchor   = esxData.FloorPlans.Count(fp => fp.RevitAnchor != null);
+            int noAnchor     = totalFloors - withAnchor;
+            DiagLog($"[ESX Read] Mode={Mode}, floors total={totalFloors}, " +
+                    $"with revitAnchor={withAnchor}, without={noAnchor}");
+
+            if (Mode == EsxReadMode.Quick && withAnchor == 0)
+            {
+                var dlg = new TaskDialog("ESX Quick Import — No anchors")
+                {
+                    MainInstruction = "This .esx has no Revit anchors",
+                    MainContent =
+                        $"None of the {totalFloors} floor plan(s) in this file have a " +
+                        "revitAnchor — Quick Import can't position APs without one.\n\n" +
+                        "Use 'ESX Manual Align' instead to do a 2-point visual " +
+                        "alignment on each floor.",
+                };
+                dlg.CommonButtons = TaskDialogCommonButtons.Ok;
+                try { dlg.Show(); } catch { }
+                return Result.Cancelled;
+            }
+            if (Mode == EsxReadMode.Quick && noAnchor > 0)
+            {
+                // Mixed .esx — per the v2.6.0 design, warn and let the
+                // user continue with anchored floors only.  The
+                // unanchored floors will be skipped inside the per-floor
+                // loop with a warning in floorResults.
+                var dlg = new TaskDialog("ESX Quick Import — Mixed file")
+                {
+                    MainInstruction = $"This .esx is mixed: {withAnchor} of {totalFloors} floors have revitAnchor",
+                    MainContent =
+                        $"Quick Import will process the {withAnchor} anchored floor(s) and " +
+                        $"SKIP the {noAnchor} floor(s) without anchors.\n\n" +
+                        $"To import the skipped floors, run 'ESX Manual Align' separately " +
+                        "on this file.",
+                };
+                dlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink1,
+                    "Continue — process anchored floors only");
+                dlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink2, "Cancel");
+                if (dlg.Show() != TaskDialogResult.CommandLink1)
+                    return Result.Cancelled;
+            }
+            if (Mode == EsxReadMode.Align && withAnchor == totalFloors && totalFloors > 0)
+            {
+                var dlg = new TaskDialog("ESX Manual Align — Quick Import would work too")
+                {
+                    MainInstruction = "All floors already have revitAnchor",
+                    MainContent =
+                        $"All {totalFloors} floor plan(s) in this .esx have a revitAnchor " +
+                        "(presumably from a previous ESX Export round-trip).  " +
+                        "'ESX Quick Import' would import them with no manual alignment " +
+                        "needed — much faster.\n\n" +
+                        "You can still proceed with Manual Align if you want to re-calibrate.",
+                };
+                dlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink1,
+                    "Continue with Manual Align (re-calibrate)");
+                dlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink2,
+                    "Cancel — I'll run ESX Quick Import instead");
+                if (dlg.Show() != TaskDialogResult.CommandLink1)
+                    return Result.Cancelled;
+            }
 
             // REQ 5+6: AP count summary
             int totalAps = esxData.AccessPoints.Count;
@@ -1862,6 +1970,21 @@ namespace EkahauRevitPlugin
                 }
 
                 var view = revitViews[viewIdx];
+
+                // v2.6.0: Quick mode skips floors without revitAnchor —
+                // they need 2-point cal which only Manual Align provides.
+                if (Mode == EsxReadMode.Quick && fp.RevitAnchor == null)
+                {
+                    floorResults.Add(new EsxReadFloorResult
+                    {
+                        FloorPlanName   = fp.Name,
+                        MatchedViewName = view.Name,
+                        Warning         = "Skipped (Quick Import): floor has no revitAnchor — use Manual Align.",
+                    });
+                    DiagLog($"[ESX Read] Quick Import skipping '{fp.Name}' (no revitAnchor).");
+                    continue;
+                }
+
                 progress.Update($"Processing: {fp.Name}", $"Matched to: {view.Name}");
                 DoEvents();
 
@@ -1920,7 +2043,8 @@ namespace EkahauRevitPlugin
                 // ══════════════════════════════════════════════════════════
                 var overlayIds_pre = PlaceImageAndAskForVerification(
                     doc, uiDoc, view, fp, esxData, progress, result,
-                    out bool userAbortedVerification_pre);
+                    out bool userAbortedVerification_pre,
+                    suppressVerifyDialog: Mode == EsxReadMode.Quick);
                 allCreatedIds.AddRange(overlayIds_pre);
 
                 if (userAbortedVerification_pre)
@@ -2138,6 +2262,16 @@ namespace EkahauRevitPlugin
                 //   try each rotation if APs land in the wrong place
                 //   and re-run from this dialog without restarting the
                 //   whole ESX Read.
+                //
+                //   v2.6.0: Quick Import skips this dialog — round-trip
+                //   ESX-Export anchors already encode the correct
+                //   rotation in their basis vectors, so asking the user
+                //   to second-guess it would be noise.
+                if (Mode == EsxReadMode.Quick)
+                {
+                    DiagLog($"[ESX Read] Quick mode: skipping rotation picker (using rotDir='{rotDir}' from .esx).");
+                    goto skipRotationPicker;
+                }
                 progress.Hide();
                 DoEvents();
                 try
@@ -2191,6 +2325,8 @@ namespace EkahauRevitPlugin
                 }
                 progress.Show();
                 DoEvents();
+
+                skipRotationPicker:
 
                 // Collect band info for legend
                 var bandsSeen = new HashSet<string>();
@@ -2339,7 +2475,14 @@ namespace EkahauRevitPlugin
                 //   We compute the delta and shift ALL APs by that amount in
                 //   a single transaction.  Staging entries are also updated
                 //   so AP Place / staging JSON reflect the corrected positions.
-                if (stagingFloor.AccessPoints.Count > 0)
+                //
+                //   v2.6.0: Quick Import skips this dialog too — round-
+                //   trip anchors are trusted to land APs correctly so
+                //   there's no offset to nudge away.  Users who want to
+                //   apply a nudge after Quick Import can move markers
+                //   manually and re-export the staging via a future
+                //   feature (or just re-run with Manual Align).
+                if (stagingFloor.AccessPoints.Count > 0 && Mode != EsxReadMode.Quick)
                 {
                     progress.Hide();
                     DoEvents();
@@ -2590,7 +2733,8 @@ namespace EkahauRevitPlugin
             Document doc, UIDocument uiDoc, ViewPlan view,
             EsxFloorPlanData fp, EsxReadResult esxData,
             EsxReadProgressWindow progress, EsxReadFloorResult result,
-            out bool userAborted)
+            out bool userAborted,
+            bool suppressVerifyDialog = false)
         {
             userAborted = false;
             var created = new List<ElementId>();
@@ -2735,6 +2879,17 @@ namespace EkahauRevitPlugin
             catch { }
 
             // ── 5. Verification dialog ──
+            //   v2.6.0: Quick Import mode skips this dialog (Option B per
+            //   the design — place the overlay so the user can see it but
+            //   don't gate AP placement on a yes/no click).  The temp
+            //   file cleanup below in `finally` still runs.
+            if (suppressVerifyDialog)
+            {
+                DiagLog($"[ESX Read] PlaceImageAndAskForVerification: " +
+                        $"verification dialog suppressed (Quick mode) for '{fp.Name}'.");
+                try { TryDeleteFile(imgPath); } catch { }
+                return created;
+            }
             progress.Hide();
             try
             {
@@ -4230,6 +4385,52 @@ namespace EkahauRevitPlugin
             System.Windows.Threading.Dispatcher.CurrentDispatcher.Invoke(
                 System.Windows.Threading.DispatcherPriority.Background,
                 new Action(() => { }));
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  v2.6.0 — Two focused entry points that wrap EsxReadCommand
+    //
+    //  Each is a tiny IExternalCommand that constructs an EsxReadCommand
+    //  with the appropriate Mode and delegates Execute().  The mode flag
+    //  controls which alignment dialogs the underlying flow runs:
+    //
+    //    EsxReadQuickCommand — fast round-trip import:
+    //      • Requires revitAnchor on every floor it processes
+    //      • Skips the verify dialog (overlay is still placed)
+    //      • Skips the rotation picker
+    //      • Skips the Nudge dialog
+    //      • Floors WITHOUT revitAnchor are skipped with a warning
+    //
+    //    EsxReadAlignCommand — full visual-alignment flow:
+    //      • Runs every dialog
+    //      • Warns up front if all floors already have anchors
+    //        (suggests Quick would be faster)
+    //
+    //  The legacy "ESX Read" button still maps to EsxReadCommand which
+    //  defaults to Mode = LegacyAuto — pre-v2.6.0 behaviour unchanged so
+    //  users with muscle memory aren't disrupted.
+    // ══════════════════════════════════════════════════════════════════════
+
+    [Transaction(TransactionMode.Manual)]
+    public class EsxReadQuickCommand : IExternalCommand
+    {
+        public Result Execute(ExternalCommandData commandData,
+            ref string message, ElementSet elements)
+        {
+            var cmd = new EsxReadCommand { Mode = EsxReadMode.Quick };
+            return cmd.Execute(commandData, ref message, elements);
+        }
+    }
+
+    [Transaction(TransactionMode.Manual)]
+    public class EsxReadAlignCommand : IExternalCommand
+    {
+        public Result Execute(ExternalCommandData commandData,
+            ref string message, ElementSet elements)
+        {
+            var cmd = new EsxReadCommand { Mode = EsxReadMode.Align };
+            return cmd.Execute(commandData, ref message, elements);
         }
     }
 }

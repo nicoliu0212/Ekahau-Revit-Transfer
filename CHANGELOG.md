@@ -5,6 +5,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.6.0] — 2026-05-15
+
+### Changed — ESX Read split into two focused workflows
+The single `ESX Read` button conflated two very different use cases into one long flow. v2.6.0 splits them into focused ribbon buttons that show only the dialogs each scenario actually needs:
+
+| Button | When to use | What it does |
+|---|---|---|
+| **`ESX Quick`** | Round-trip — `.esx` came from `ESX Export` (every floor has `revitAnchor`) | 3-4 step flow: pick file → pick floors → review APs → done.  Places the image overlay (Option B — no verify dialog) so users can eyeball it, then places APs at the anchored positions and stops.  **Skips** manual alignment, rotation picker, and Nudge. |
+| **`ESX Align`** | External — `.esx` was built from PDF / image in Ekahau Pro (no anchor) | Full visual-cal flow: pick view → image overlay + verify → 4-point manual alignment → rotation picker → AP review → Nudge.  Same as the pre-v2.6.0 `ESX Read` experience. |
+| `ESX Read` (legacy) | Backwards compat — users with muscle memory | Runs every dialog exactly as it did pre-v2.6.0.  Stays in the ribbon for one major version, then likely removed. |
+
+### Cross-mode warnings
+Each button auto-detects when the wrong tool was chosen and offers to switch:
+
+- **Quick + no anchors** → blocks with `"This .esx has no Revit anchors — use ESX Align instead"` and cancels.
+- **Quick + mixed (some anchors, some not)** → warns `"3 of 5 floors have anchors; the 2 unanchored will be skipped"` and lets the user continue or cancel.  The unanchored floors are reported in the summary with `"Skipped (Quick Import): floor has no revitAnchor — use Manual Align."`.
+- **Align + all anchors present** → suggests `"All floors already have anchors — ESX Quick would be faster"` and offers to cancel.
+
+### Implementation
+- Added `EsxReadMode { LegacyAuto, Quick, Align }` enum + `EsxReadCommand.Mode` property.
+- Two new thin `IExternalCommand` wrappers (`EsxReadQuickCommand`, `EsxReadAlignCommand`) construct an `EsxReadCommand`, set `Mode`, and delegate `Execute`.  All the underlying parsing / AP-placement logic is shared — no code duplication.
+- Mode-conditional skips inside the existing flow:
+  - `PlaceImageAndAskForVerification(..., suppressVerifyDialog: Mode == Quick)` — overlay is still placed, dialog is not shown.
+  - Rotation picker (`ESX Read — AP Rotation`) — `goto`-skipped in Quick mode.
+  - Nudge dialog (`ESX Read — AP Position Check`) — gated on `Mode != Quick`.
+- Per-floor loop skips floors without `revitAnchor` when `Mode == Quick` (with a warning in `floorResults`).
+- `DiagLog` records the active mode + anchor counts at start of every run for trace clarity.
+
+### Why this is a minor bump
+Behaviour of the existing `ESX Read` button is unchanged (`Mode = LegacyAuto`).  All new behaviour is opt-in via the two new buttons.  No migration / re-install required for users who don't want to use the new workflow.
+
 ## [2.5.26] — 2026-05-05
 
 ### Added — "Nudge All" single-point AP correction
