@@ -215,6 +215,187 @@ namespace EkahauRevitPlugin
         /// in <paramref name="detail"/> on failure (caller surfaces this
         /// in the error dialog).
         /// </summary>
+        // ══════════════════════════════════════════════════════════════
+        //  v2.6.3: design-area cropping
+        //
+        //  When Ekahau ships a bitmap that's the full PDF/Sheet (title
+        //  block + notes + design area), the user's visual reference is
+        //  the design area only (that's what Ekahau Pro shows in its
+        //  heat-map view).  Cropping the bitmap to floorPlans.json's
+        //  cropMin/Max region before placing it in Revit lines up the
+        //  displayed image with the user's mental model — and lets AP
+        //  positions land naturally on the floor plan content instead
+        //  of being scattered over title-block whitespace.
+        // ══════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Result of <see cref="CropToDesignArea"/>.  When
+        /// <see cref="WasCropped"/> is false, <see cref="Reason"/>
+        /// explains why we returned the original bytes unchanged.
+        /// </summary>
+        public struct CropInfo
+        {
+            public bool   WasCropped;
+            public int    CropOffsetBitmapX;
+            public int    CropOffsetBitmapY;
+            public int    CroppedBitmapWidth;
+            public int    CroppedBitmapHeight;
+            public int    OriginalBitmapWidth;
+            public int    OriginalBitmapHeight;
+            public double FpCropMinX;
+            public double FpCropMinY;
+            public double FpCropMaxX;
+            public double FpCropMaxY;
+            public string Reason;
+        }
+
+        /// <summary>
+        /// Crop a bitmap to the floor plan's "design area" (the region
+        /// defined by <c>cropMinX/Y, cropMaxX/Y</c> in floorPlans.json,
+        /// expressed in fp-space coords).  The bitmap is assumed to be
+        /// a uniform-scale render of the full fp space — i.e.,
+        /// <c>bitmap.Width / fp.Width == bitmap.Height / fp.Height</c>.
+        /// We sanity-check that before cropping.
+        ///
+        /// Falls back to returning the original bytes (with
+        /// <see cref="CropInfo.WasCropped"/> = false and a diagnostic
+        /// in <see cref="CropInfo.Reason"/>) when:
+        /// <list type="bullet">
+        /// <item>fp dimensions are zero or negative</item>
+        /// <item>crop bounds are invalid (min &gt;= max, or NaN)</item>
+        /// <item>crop covers ≥99% of the image (no actual cropping
+        ///   needed — likely a metadata default)</item>
+        /// <item>bitmap aspect ratio differs from fp aspect by &gt;1%
+        ///   (non-uniform scale — cropping would distort)</item>
+        /// <item>WIC decode of the input bytes fails</item>
+        /// <item>resulting crop would be smaller than 100×100 px</item>
+        /// </list>
+        ///
+        /// On success: returns a PNG byte[] of just the design area,
+        /// with crop offsets / sizes captured in the out parameter.
+        /// </summary>
+        public static byte[] CropToDesignArea(
+            byte[] inputBytes,
+            double fpWidth, double fpHeight,
+            double cropMinX, double cropMinY,
+            double cropMaxX, double cropMaxY,
+            out CropInfo info)
+        {
+            info = new CropInfo
+            {
+                FpCropMinX = cropMinX,
+                FpCropMinY = cropMinY,
+                FpCropMaxX = cropMaxX,
+                FpCropMaxY = cropMaxY,
+            };
+
+            if (inputBytes == null || inputBytes.Length == 0)
+            {
+                info.Reason = "no input bytes";
+                return inputBytes;
+            }
+            if (fpWidth <= 0 || fpHeight <= 0)
+            {
+                info.Reason = $"fp.Width={fpWidth} or fp.Height={fpHeight} not positive";
+                return inputBytes;
+            }
+            if (double.IsNaN(cropMinX) || double.IsNaN(cropMinY) ||
+                double.IsNaN(cropMaxX) || double.IsNaN(cropMaxY) ||
+                cropMinX >= cropMaxX || cropMinY >= cropMaxY)
+            {
+                info.Reason = $"crop bounds invalid: ({cropMinX:F1},{cropMinY:F1})..({cropMaxX:F1},{cropMaxY:F1})";
+                return inputBytes;
+            }
+            double cropFpW = cropMaxX - cropMinX;
+            double cropFpH = cropMaxY - cropMinY;
+            if (cropFpW / fpWidth > 0.99 && cropFpH / fpHeight > 0.99)
+            {
+                info.Reason = $"crop ≈ full image ({cropFpW:F0}x{cropFpH:F0} / {fpWidth:F0}x{fpHeight:F0}) — no cropping needed";
+                return inputBytes;
+            }
+
+            // Decode to learn the bitmap's actual pixel dimensions.
+            BitmapSource src;
+            try
+            {
+                using var ms = new MemoryStream(inputBytes);
+                var decoder = BitmapDecoder.Create(
+                    ms, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
+                src = decoder.Frames[0];
+            }
+            catch (Exception ex)
+            {
+                info.Reason = $"WIC decode failed: {ex.Message}";
+                return inputBytes;
+            }
+
+            int bw = src.PixelWidth, bh = src.PixelHeight;
+            info.OriginalBitmapWidth  = bw;
+            info.OriginalBitmapHeight = bh;
+
+            // Uniform-scale assumption check.  fp aspect and bitmap aspect
+            // must match for a uniform crop to be safe — otherwise the
+            // crop region in bitmap pixels would distort the content.
+            double fpAspect = fpWidth / fpHeight;
+            double bpAspect = (double)bw / bh;
+            if (Math.Abs(fpAspect - bpAspect) / fpAspect > 0.01)
+            {
+                info.Reason = $"bitmap aspect ({bpAspect:F4}) differs from fp aspect ({fpAspect:F4}) by >1% — not safe to crop";
+                return inputBytes;
+            }
+
+            // Compute crop in bitmap pixels.  Use X and Y scale factors
+            // independently to be robust against ≤1% aspect mismatch.
+            double sx = (double)bw / fpWidth;
+            double sy = (double)bh / fpHeight;
+            int cx0 = (int)Math.Round(cropMinX * sx);
+            int cy0 = (int)Math.Round(cropMinY * sy);
+            int cx1 = (int)Math.Round(cropMaxX * sx);
+            int cy1 = (int)Math.Round(cropMaxY * sy);
+
+            // Clamp to bitmap bounds.
+            cx0 = Math.Max(0, Math.Min(cx0, bw - 1));
+            cy0 = Math.Max(0, Math.Min(cy0, bh - 1));
+            cx1 = Math.Max(cx0 + 1, Math.Min(cx1, bw));
+            cy1 = Math.Max(cy0 + 1, Math.Min(cy1, bh));
+
+            int cropW = cx1 - cx0;
+            int cropH = cy1 - cy0;
+            if (cropW < 100 || cropH < 100)
+            {
+                info.Reason = $"crop too small ({cropW}x{cropH}) — possibly bad metadata";
+                return inputBytes;
+            }
+
+            // Crop + re-encode as PNG.
+            try
+            {
+                var rect = new System.Windows.Int32Rect(cx0, cy0, cropW, cropH);
+                var cropped = new CroppedBitmap(src, rect);
+
+                var encoder = new PngBitmapEncoder();
+                encoder.Frames.Add(BitmapFrame.Create(cropped));
+                using var oms = new MemoryStream();
+                encoder.Save(oms);
+
+                info.WasCropped          = true;
+                info.CropOffsetBitmapX   = cx0;
+                info.CropOffsetBitmapY   = cy0;
+                info.CroppedBitmapWidth  = cropW;
+                info.CroppedBitmapHeight = cropH;
+                info.Reason              =
+                    $"cropped {bw}x{bh} → {cropW}x{cropH} at ({cx0},{cy0}); " +
+                    $"fp crop ({cropMinX:F1},{cropMinY:F1})..({cropMaxX:F1},{cropMaxY:F1})";
+                Debug.WriteLine($"[ImageNormalizer] CropToDesignArea: {info.Reason}");
+                return oms.ToArray();
+            }
+            catch (Exception ex)
+            {
+                info.Reason = $"crop encode failed: {ex.Message}";
+                return inputBytes;
+            }
+        }
+
         public static byte[] NormalizeForRevit(
             byte[] inputBytes, out string detail, int maxDim = 4000)
         {

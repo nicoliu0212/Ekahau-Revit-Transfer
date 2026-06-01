@@ -54,6 +54,56 @@ namespace EkahauRevitPlugin
         /// <see cref="EsxCoordXform.RotateApFromDisplayToImageSpace"/>.
         /// </summary>
         public string RotateUpDirection { get; set; } = "UP";
+
+        // ── v2.6.3: design-area crop fields (from floorPlans.json) ─────
+        /// <summary>
+        /// Ekahau's "design area" within the floor plan (fp coord units).
+        /// In the .esx this is the region the WiFi designer selected to
+        /// work in — APs are placed inside it.  The bitmap that Ekahau
+        /// ships often shows the FULL sheet (title block + notes +
+        /// design area), but the user's visual reference (Ekahau's
+        /// heat-map view) is just the design area.  v2.6.3 crops the
+        /// bitmap to this region before placing it in Revit so the user
+        /// sees the same content they'd see in Ekahau Pro.
+        ///
+        /// When CropMaxX &lt;= CropMinX (or Max&lt;=Min for Y), the crop
+        /// info is treated as invalid and the full bitmap is used.
+        /// </summary>
+        public double CropMinX { get; set; }
+        public double CropMinY { get; set; }
+        public double CropMaxX { get; set; }
+        public double CropMaxY { get; set; }
+
+        // ── v2.6.3: cached "image was actually cropped" info ───────────
+        //   Set by PlaceImageAndAskForVerification / OfferVisualAlignmentCore
+        //   right after the bitmap is cropped, so the AP-placement loop
+        //   can use the same crop fractions to map AP fp coords onto the
+        //   cropped image's footprint.  Null when the bitmap wasn't cropped
+        //   (Quick / legacy modes, or crop bounds invalid).
+        public bool   CropApplied      { get; set; }
+        public double CropAppliedMinFpX { get; set; }
+        public double CropAppliedMinFpY { get; set; }
+        public double CropAppliedMaxFpX { get; set; }
+        public double CropAppliedMaxFpY { get; set; }
+
+        // ── v2.6.3: aligned image placement params (Bug Fix from user) ─
+        //   Set by OfferVisualAlignmentCoreImpl after the 2-pair visual
+        //   calibration computes the image's final pose.  The AP-placement
+        //   loop reads these directly to produce a transform that uses
+        //   the SAME parameters the image was placed with — guaranteed
+        //   correspondence between image features and AP positions.
+        //
+        //   When all six are non-null, the AP loop bypasses
+        //   BuildEkahauToRevitXform and uses the direct image-params
+        //   formula.  Null on Quick / legacy modes — those still go
+        //   through BuildEkahauToRevitXform.
+        public double? AlignedImageCenterX { get; set; }
+        public double? AlignedImageCenterY { get; set; }
+        public double? AlignedImageWidthFt  { get; set; }
+        public double? AlignedImageHeightFt { get; set; }
+        public double? AlignedCosR { get; set; }
+        public double? AlignedSinR { get; set; }
+
         public EsxRevitAnchorData RevitAnchor { get; set; }
     }
 
@@ -355,6 +405,17 @@ namespace EkahauRevitPlugin
                                 // into image-space before going through
                                 // the visual-cal transform.
                                 RotateUpDirection = GetStr(fp, "rotateUpDirection", "UP"),
+                                // v2.6.3: design-area crop bounds. The
+                                // user's "active area" in Ekahau — the
+                                // visual reference they expect APs to
+                                // match.  The full bitmap often has
+                                // title block + notes outside this
+                                // region; cropping aligns the displayed
+                                // image with their mental model.
+                                CropMinX = GetDbl(fp, "cropMinX"),
+                                CropMinY = GetDbl(fp, "cropMinY"),
+                                CropMaxX = GetDbl(fp, "cropMaxX"),
+                                CropMaxY = GetDbl(fp, "cropMaxY"),
                             };
                             if (fp.TryGetProperty("revitAnchor", out var anchor))
                                 plan.RevitAnchor = ParseRevitAnchor(anchor);
@@ -2044,7 +2105,8 @@ namespace EkahauRevitPlugin
                 var overlayIds_pre = PlaceImageAndAskForVerification(
                     doc, uiDoc, view, fp, esxData, progress, result,
                     out bool userAbortedVerification_pre,
-                    suppressVerifyDialog: Mode == EsxReadMode.Quick);
+                    suppressVerifyDialog: Mode == EsxReadMode.Quick,
+                    mode: Mode);
                 allCreatedIds.AddRange(overlayIds_pre);
 
                 if (userAbortedVerification_pre)
@@ -2352,6 +2414,49 @@ namespace EkahauRevitPlugin
                     {
                         tx.Start();
 
+                        // ── v2.6.3 Bug Fix (user-proposed): direct image-params AP transform ──
+                        //   When visual cal succeeded, fp.AlignedImage* fields
+                        //   hold the EXACT pose the image was placed at.
+                        //   Compute AP world coords directly from those —
+                        //   guaranteed correspondence between image features
+                        //   and AP markers, bypasses BuildEkahauToRevitXform
+                        //   entirely.  When CropApplied=true, fp coords map
+                        //   to the cropped image's footprint via crop
+                        //   fractions; when false, they map to the full
+                        //   image's footprint via fp.Width/Height.
+                        //
+                        //   Falls back to the captured `xform` (built earlier
+                        //   from BuildEkahauToRevitXform) when no aligned
+                        //   image params are set — that's Quick / legacy
+                        //   mode round-trip flow.
+                        bool useDirectImageXform = fp.AlignedImageCenterX.HasValue
+                            && fp.AlignedImageCenterY.HasValue
+                            && fp.AlignedImageWidthFt.HasValue
+                            && fp.AlignedImageHeightFt.HasValue
+                            && fp.AlignedCosR.HasValue
+                            && fp.AlignedSinR.HasValue;
+
+                        double dImgCx  = useDirectImageXform ? fp.AlignedImageCenterX.Value  : 0;
+                        double dImgCy  = useDirectImageXform ? fp.AlignedImageCenterY.Value  : 0;
+                        double dImgW   = useDirectImageXform ? fp.AlignedImageWidthFt.Value  : 0;
+                        double dImgH   = useDirectImageXform ? fp.AlignedImageHeightFt.Value : 0;
+                        double dCosR   = useDirectImageXform ? fp.AlignedCosR.Value          : 1;
+                        double dSinR   = useDirectImageXform ? fp.AlignedSinR.Value          : 0;
+                        // Crop bounds (or fp full bounds when no crop applied)
+                        double xUMin = fp.CropApplied ? fp.CropAppliedMinFpX : 0;
+                        double xUMax = fp.CropApplied ? fp.CropAppliedMaxFpX : fp.Width;
+                        double xVMin = fp.CropApplied ? fp.CropAppliedMinFpY : 0;
+                        double xVMax = fp.CropApplied ? fp.CropAppliedMaxFpY : fp.Height;
+                        double xURange = xUMax - xUMin;
+                        double xVRange = xVMax - xVMin;
+                        DiagLog($"[ESX Read] AP transform path: " +
+                                $"{(useDirectImageXform ? "DIRECT image-params" : "FALLBACK BuildEkahauToRevitXform")} " +
+                                (useDirectImageXform
+                                    ? $"(imgCenter=({dImgCx:F2},{dImgCy:F2}), size=({dImgW:F2}x{dImgH:F2}), " +
+                                      $"rot={Math.Atan2(dSinR,dCosR)*180/Math.PI:F2}°, " +
+                                      $"crop=({xUMin:F1},{xVMin:F1})..({xUMax:F1},{xVMax:F1}))"
+                                    : ""));
+
                         int apIdx = 0;
                         foreach (var ap in apsToPlace)
                         {
@@ -2365,7 +2470,27 @@ namespace EkahauRevitPlugin
                                         ap.PixelX, ap.PixelY,
                                         fp.Width, fp.Height, rotDir);
 
-                                var (wx, wy) = xform(apImgX, apImgY);
+                                double wx, wy;
+                                if (useDirectImageXform)
+                                {
+                                    // Direct image-params transform.
+                                    // 1. fp coord → crop fraction [0..1]
+                                    double uFrac = (apImgX - xUMin) / xURange;
+                                    double vFrac = (apImgY - xVMin) / xVRange;
+                                    // 2. → ft offset from image center
+                                    //    (Y flip: pixel Y down → world Y up)
+                                    double dxFt = (uFrac - 0.5) * dImgW;
+                                    double dyFt = -(vFrac - 0.5) * dImgH;
+                                    // 3. → world (rotate around image center)
+                                    wx = dImgCx + dxFt * dCosR - dyFt * dSinR;
+                                    wy = dImgCy + dxFt * dSinR + dyFt * dCosR;
+                                }
+                                else
+                                {
+                                    var t = xform(apImgX, apImgY);
+                                    wx = t.Wx;
+                                    wy = t.Wy;
+                                }
 
                                 // Diagnostic dump for the first 5 APs only
                                 // (avoid flooding the log with 360+ lines).
@@ -2520,20 +2645,16 @@ namespace EkahauRevitPlugin
                                 : "Looks good now — continue");
                         nudgeDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink2,
                             nudgeRound == 1
-                                ? "Translation only — markers offset (2 clicks)"
-                                : "Apply another translation nudge",
+                                ? "Markers are offset — correct positions"
+                                : "Apply another nudge",
                             "Click an AP marker, then click where it should actually be. " +
-                            "All markers shift by the same delta. Use this when APs look " +
-                            "rotated correctly but shifted by a uniform offset.");
+                            "All markers shift by the same delta.");
+                        // v2.6.3: 4-click full re-align removed — it required
+                        // pairing AP markers with bitmap features, which
+                        // users can't do in ESX Align (no existing APs in
+                        // the Revit model to use as reference, and the
+                        // bitmap doesn't label individual AP positions).
                         nudgeDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink3,
-                            nudgeRound == 1
-                                ? "Translation + rotation — full re-align (4 clicks)"
-                                : "Apply another full re-align",
-                            "Click 2 PAIRS (4 points): (current AP #1 → target AP #1), " +
-                            "(current AP #2 far from #1 → target AP #2).  All markers " +
-                            "rotate + translate together.  Use this when APs are not " +
-                            "just shifted but also rotated (e.g., 90° off).");
-                        nudgeDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink4,
                             "Skip — I'll move markers manually",
                             "Select and move markers in Revit yourself before running AP Place.");
                         nudgeDlg.DefaultButton = TaskDialogResult.CommandLink1;
@@ -2646,181 +2767,12 @@ namespace EkahauRevitPlugin
                             // assess whether another nudge is needed.
                             // Do NOT set nudgeOuterDone here.
                         }
-                        else if (nudgeResp == TaskDialogResult.CommandLink3)
-                        {
-                            // v2.6.2: 4-click full re-align (translation + rotation)
-                            bool nudgeDone = false;
-                            while (!nudgeDone)
-                            {
-                                XYZ cur1 = null, tgt1 = null, cur2 = null, tgt2 = null;
-                                try
-                                {
-                                    cur1 = uiDoc.Selection.PickPoint(
-                                        "PAIR 1 / step 1 — click an existing AP marker (where it IS now)");
-                                    tgt1 = uiDoc.Selection.PickPoint(
-                                        "PAIR 1 / step 2 — click where that AP SHOULD BE on the image");
-                                    cur2 = uiDoc.Selection.PickPoint(
-                                        "PAIR 2 / step 1 — click another AP marker FAR from the first (where it IS now)");
-                                    tgt2 = uiDoc.Selection.PickPoint(
-                                        "PAIR 2 / step 2 — click where that AP SHOULD BE on the image");
-                                }
-                                catch (Autodesk.Revit.Exceptions.OperationCanceledException)
-                                {
-                                    DiagLog("[ESX Read] User cancelled 4-click re-align — skipping correction.");
-                                    nudgeDone = true;
-                                    break;
-                                }
-
-                                double dxCur = cur2.X - cur1.X;
-                                double dyCur = cur2.Y - cur1.Y;
-                                double dxTgt = tgt2.X - tgt1.X;
-                                double dyTgt = tgt2.Y - tgt1.Y;
-                                double distCur = Math.Sqrt(dxCur * dxCur + dyCur * dyCur);
-                                double distTgt = Math.Sqrt(dxTgt * dxTgt + dyTgt * dyTgt);
-
-                                if (distCur < 0.5 || distTgt < 0.5)
-                                {
-                                    try
-                                    {
-                                        TaskDialog.Show("Re-align — picks too close",
-                                            "PAIR 1 and PAIR 2 must be far apart to compute a stable " +
-                                            "rotation.  Try again and pick AP markers on opposite ends " +
-                                            "of the floor plan.");
-                                    }
-                                    catch { }
-                                    continue;
-                                }
-
-                                double angleCur = Math.Atan2(dyCur, dxCur);
-                                double angleTgt = Math.Atan2(dyTgt, dxTgt);
-                                double rotation = angleTgt - angleCur;
-                                // Normalise to (-180°, 180°] so the dialog reads sensibly.
-                                double rotDeg = rotation * 180.0 / Math.PI;
-                                while (rotDeg >  180) rotDeg -= 360;
-                                while (rotDeg <= -180) rotDeg += 360;
-                                rotation = rotDeg * Math.PI / 180.0;
-
-                                double scale = distTgt / distCur;
-                                double translateX = tgt1.X - cur1.X;
-                                double translateY = tgt1.Y - cur1.Y;
-
-                                DiagLog($"[ESX Read] 4-click re-align: rotation = {rotDeg:F2}°, " +
-                                        $"scale = {scale:F3}, translate after rotate = " +
-                                        $"({translateX:F2}, {translateY:F2}) ft, " +
-                                        $"pivot = ({cur1.X:F2}, {cur1.Y:F2}) ft");
-
-                                string scaleNote = Math.Abs(scale - 1.0) > 0.10
-                                    ? $"  ⚠  scale differs from 1.0 by {Math.Abs(scale - 1.0) * 100:F0}% — " +
-                                      "marker shapes won't scale (only positions move)"
-                                    : "  OK";
-
-                                var confirmDlg = new TaskDialog("Confirm Re-align")
-                                {
-                                    MainInstruction = $"Apply rotation {rotDeg:F2}° + translation to all {stagingFloor.AccessPoints.Count} AP markers?",
-                                    MainContent =
-                                        $"Rotation:    {rotDeg:F2}°\n" +
-                                        $"Translation: ({translateX:F2}, {translateY:F2}) ft  (after rotation around AP #1 click)\n" +
-                                        $"Scale:       {scale:F3}{scaleNote}\n\n" +
-                                        $"All AP marker elements (circles + crosses + labels) will rotate " +
-                                        $"around AP #1 by the angle above, then translate to land AP #1 on " +
-                                        $"its target.  Marker shapes do not scale — only positions move.",
-                                };
-                                confirmDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink1,
-                                    "Apply — re-align all markers");
-                                confirmDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink2,
-                                    "Try again — pick different points");
-                                confirmDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink3,
-                                    "Cancel correction");
-                                confirmDlg.DefaultButton = TaskDialogResult.CommandLink1;
-                                var confirmResp = confirmDlg.Show();
-
-                                if (confirmResp == TaskDialogResult.CommandLink1)
-                                {
-                                    int moved = 0;
-                                    try
-                                    {
-                                        using var realignTx = new Transaction(doc, "ESX Read — Re-align AP markers");
-                                        realignTx.Start();
-
-                                        var allMarkerIds = new List<ElementId>();
-                                        foreach (var apEntry in stagingFloor.AccessPoints)
-                                        {
-                                            foreach (var markerLongId in apEntry.MarkerElementIds)
-                                            {
-                                                try
-                                                {
-                                                    var eid = VersionCompat.MakeId(markerLongId);
-                                                    var elem = doc.GetElement(eid);
-                                                    if (elem != null && !(elem is ImageInstance))
-                                                        allMarkerIds.Add(eid);
-                                                }
-                                                catch { }
-                                            }
-                                        }
-                                        moved = allMarkerIds.Count;
-
-                                        if (allMarkerIds.Count > 0)
-                                        {
-                                            // 1. Rotate around vertical axis through cur1.
-                                            if (Math.Abs(rotation) > 1e-5)
-                                            {
-                                                var axis = Line.CreateBound(
-                                                    new XYZ(cur1.X, cur1.Y, cur1.Z),
-                                                    new XYZ(cur1.X, cur1.Y, cur1.Z + 1));
-                                                ElementTransformUtils.RotateElements(doc, allMarkerIds, axis, rotation);
-                                            }
-                                            // 2. Translate by (tgt1 - cur1) so cur1 lands at tgt1.
-                                            var transVec = new XYZ(translateX, translateY, 0);
-                                            if (transVec.GetLength() > 1e-6)
-                                                ElementTransformUtils.MoveElements(doc, allMarkerIds, transVec);
-                                        }
-
-                                        // Update staging WorldX/Y so downstream tools see the
-                                        // corrected positions.  Apply the same rotate-around-cur1
-                                        // + translate to each AP's stored world coords.
-                                        double cosR = Math.Cos(rotation);
-                                        double sinR = Math.Sin(rotation);
-                                        foreach (var apEntry in stagingFloor.AccessPoints)
-                                        {
-                                            double rx = apEntry.WorldX - cur1.X;
-                                            double ry = apEntry.WorldY - cur1.Y;
-                                            double newRx = rx * cosR - ry * sinR;
-                                            double newRy = rx * sinR + ry * cosR;
-                                            apEntry.WorldX = cur1.X + newRx + translateX;
-                                            apEntry.WorldY = cur1.Y + newRy + translateY;
-                                        }
-
-                                        realignTx.Commit();
-                                        DiagLog($"[ESX Read] Re-align applied: {moved} elements transformed.");
-                                    }
-                                    catch (Exception realignEx)
-                                    {
-                                        DiagLog($"[ESX Read] Re-align transaction failed: {realignEx.Message}");
-                                        try
-                                        {
-                                            TaskDialog.Show("Re-align failed",
-                                                $"Could not apply re-align:\n{realignEx.Message}");
-                                        }
-                                        catch { }
-                                    }
-                                    nudgeDone = true;
-                                }
-                                else if (confirmResp == TaskDialogResult.CommandLink3)
-                                {
-                                    nudgeDone = true;
-                                    nudgeOuterDone = true;
-                                }
-                                // CommandLink2 (try again) → loop back, re-pick.
-                            }
-                            // After re-align (or skip), re-enter outer loop so user
-                            // can do another round if needed.
-                        }
                         else if (nudgeResp == TaskDialogResult.CommandLink1)
                         {
                             // "Positions are correct — continue" → done.
                             nudgeOuterDone = true;
                         }
-                        else if (nudgeResp == TaskDialogResult.CommandLink4)
+                        else if (nudgeResp == TaskDialogResult.CommandLink3)
                         {
                             try
                             {
@@ -2951,7 +2903,8 @@ namespace EkahauRevitPlugin
             EsxFloorPlanData fp, EsxReadResult esxData,
             EsxReadProgressWindow progress, EsxReadFloorResult result,
             out bool userAborted,
-            bool suppressVerifyDialog = false)
+            bool suppressVerifyDialog = false,
+            EsxReadMode mode = EsxReadMode.LegacyAuto)
         {
             userAborted = false;
             var created = new List<ElementId>();
@@ -3043,6 +2996,31 @@ namespace EkahauRevitPlugin
             Debug.WriteLine($"[ESX Read] WIC re-encode: {normDetail}");
             if (normalized != null && normalized.Length > 100)
                 imgBytes = normalized;
+
+            //   v2.6.3: Align mode only — crop the bitmap to the design
+            //   area (floorPlans.json cropMin/Max) so the user sees the
+            //   same content Ekahau Pro shows in its heat-map view.
+            //   Quick / Legacy modes keep the full bitmap (their AP
+            //   transform is built on full-fp coords).
+            if (mode == EsxReadMode.Align)
+            {
+                var croppedBytes = ImageNormalizer.CropToDesignArea(
+                    imgBytes, fp.Width, fp.Height,
+                    fp.CropMinX, fp.CropMinY, fp.CropMaxX, fp.CropMaxY,
+                    out var cropInfo);
+                DiagLog($"[ESX Read] Design-area crop: {cropInfo.Reason}");
+                if (cropInfo.WasCropped && croppedBytes != null && croppedBytes.Length > 100)
+                {
+                    imgBytes = croppedBytes;
+                    // Remember the crop bounds so the AP-placement loop
+                    // can map fp coords onto the cropped image's footprint.
+                    fp.CropApplied        = true;
+                    fp.CropAppliedMinFpX  = cropInfo.FpCropMinX;
+                    fp.CropAppliedMinFpY  = cropInfo.FpCropMinY;
+                    fp.CropAppliedMaxFpX  = cropInfo.FpCropMaxX;
+                    fp.CropAppliedMaxFpY  = cropInfo.FpCropMaxY;
+                }
+            }
 
             //   Match the file extension to the actual raster format —
             //   Revit's WIC dispatch is extension-driven.  After the
@@ -3153,8 +3131,10 @@ namespace EkahauRevitPlugin
                     EsxRevitAnchorData newAnchor = null;
                     try
                     {
+                        // v2.6.3: thread `mode` through so OfferVisualAlignmentCore
+                        // can decide whether to crop the bitmap.
                         newAnchor = OfferVisualAlignmentCore(
-                            uiDoc, view, fp, esxData, skipIntro: true);
+                            uiDoc, view, fp, esxData, skipIntro: true, mode: mode);
                         Debug.WriteLine($"[ESX Read] OfferVisualAlignmentCore returned: " +
                             (newAnchor != null ? "anchor (success)" : "null (cancelled or error)"));
                     }
@@ -3178,7 +3158,8 @@ namespace EkahauRevitPlugin
                         fp.RevitAnchor = newAnchor;
                         try { progress.Show(); DoEvents(); } catch { }
                         return PlaceImageAndAskForVerification(
-                            doc, uiDoc, view, fp, esxData, progress, result, out userAborted);
+                            doc, uiDoc, view, fp, esxData, progress, result, out userAborted,
+                            mode: mode);
                     }
 
                     // Alignment cancelled or failed — treat as floor abort
@@ -3583,11 +3564,12 @@ namespace EkahauRevitPlugin
         private static EsxRevitAnchorData OfferVisualAlignmentCore(
             UIDocument uiDoc, ViewPlan view, EsxFloorPlanData fp,
             EsxReadResult esxData,
-            bool skipIntro = false)
+            bool skipIntro = false,
+            EsxReadMode mode = EsxReadMode.LegacyAuto)
         {
             try
             {
-                return OfferVisualAlignmentCoreImpl(uiDoc, view, fp, esxData, skipIntro);
+                return OfferVisualAlignmentCoreImpl(uiDoc, view, fp, esxData, skipIntro, mode);
             }
             catch (Autodesk.Revit.Exceptions.OperationCanceledException)
             {
@@ -3617,14 +3599,16 @@ namespace EkahauRevitPlugin
         private static EsxRevitAnchorData OfferVisualAlignmentCoreImpl(
             UIDocument uiDoc, ViewPlan view, EsxFloorPlanData fp,
             EsxReadResult esxData,
-            bool skipIntro)
+            bool skipIntro,
+            EsxReadMode mode = EsxReadMode.LegacyAuto)
         {
             Document doc = view.Document;
             DiagLog($"\n========== ESX Read — Visual Alignment session ==========\n" +
                     $"  Plugin version : {VersionInfo.Version}\n" +
                     $"  Floor plan     : '{fp?.Name}' (id={fp?.Id})\n" +
                     $"  View           : '{view?.Name}'\n" +
-                    $"  skipIntro      : {skipIntro}");
+                    $"  skipIntro      : {skipIntro}\n" +
+                    $"  mode           : {mode}");
 
             // ── 1. Image bytes → temp file ──────────────────────────
             //   Same robust lookup as PlaceImageAndAskForVerification:
@@ -3668,6 +3652,31 @@ namespace EkahauRevitPlugin
             Debug.WriteLine($"[ESX Read] WIC re-encode: {normDetail}");
             if (normalized != null && normalized.Length > 100)
                 imgBytes = normalized;
+
+            // v2.6.3: Align mode crops bitmap to design area (cropMin/Max).
+            //   Visual cal happens on the cropped image, so picks land
+            //   on the same content the user sees in Ekahau Pro's
+            //   heat-map view.  Legacy mode skips this to preserve
+            //   pre-v2.6.0 behaviour.  fp.CropApplied + bounds are
+            //   recorded so the AP-placement loop downstream can use
+            //   the same crop fractions.
+            if (mode == EsxReadMode.Align)
+            {
+                var croppedBytes = ImageNormalizer.CropToDesignArea(
+                    imgBytes, fp.Width, fp.Height,
+                    fp.CropMinX, fp.CropMinY, fp.CropMaxX, fp.CropMaxY,
+                    out var cropInfo);
+                DiagLog($"[Visual Cal] Design-area crop: {cropInfo.Reason}");
+                if (cropInfo.WasCropped && croppedBytes != null && croppedBytes.Length > 100)
+                {
+                    imgBytes = croppedBytes;
+                    fp.CropApplied        = true;
+                    fp.CropAppliedMinFpX  = cropInfo.FpCropMinX;
+                    fp.CropAppliedMinFpY  = cropInfo.FpCropMinY;
+                    fp.CropAppliedMaxFpX  = cropInfo.FpCropMaxX;
+                    fp.CropAppliedMaxFpY  = cropInfo.FpCropMaxY;
+                }
+            }
 
             // Pick the temp-file extension to match the actual raster
             // format — Revit's ImageType.Create dispatches its WIC
@@ -4047,7 +4056,31 @@ namespace EkahauRevitPlugin
             double cdy = -((imgPxH / 2.0) - ek1y_img);
             double newCenterX = modelPt1.X + (cdx * cosR - cdy * sinR) * ftPerPx_img;
             double newCenterY = modelPt1.Y + (cdx * sinR + cdy * cosR) * ftPerPx_img;
-            double newWidthFt = imgPxW * ftPerPx_img;
+            double newWidthFt  = imgPxW * ftPerPx_img;
+            double newHeightFt = imgPxH * ftPerPx_img;
+
+            // ── v2.6.3: store image-placement params on fp ─────────────
+            //   The AP-placement loop reads these directly to compute
+            //   world positions, guaranteeing AP markers land on the
+            //   same pixels of the placed image (Bug Fix from user).
+            //   When fp.CropApplied is also true, the AP transform maps
+            //   fp coords to the CROPPED image's footprint (via crop
+            //   fractions).  When CropApplied is false, fp coords map
+            //   1:1 to the full image's footprint.
+            fp.AlignedImageCenterX  = newCenterX;
+            fp.AlignedImageCenterY  = newCenterY;
+            fp.AlignedImageWidthFt  = newWidthFt;
+            fp.AlignedImageHeightFt = newHeightFt;
+            fp.AlignedCosR          = cosR;
+            fp.AlignedSinR          = sinR;
+            DiagLog(
+                "[Visual Cal] Aligned image params stored on fp:\n" +
+                $"  imgCenter = ({newCenterX:F3}, {newCenterY:F3}) ft\n" +
+                $"  imgSize   = ({newWidthFt:F3} x {newHeightFt:F3}) ft\n" +
+                $"  cosR={cosR:F4}, sinR={sinR:F4}, rotation={Math.Atan2(sinR,cosR)*180/Math.PI:F2}°\n" +
+                $"  CropApplied = {fp.CropApplied}, fp crop = " +
+                $"({fp.CropAppliedMinFpX:F1},{fp.CropAppliedMinFpY:F1})" +
+                $"..({fp.CropAppliedMaxFpX:F1},{fp.CropAppliedMaxFpY:F1})");
 
             ElementId alignedImgId = null;
             try

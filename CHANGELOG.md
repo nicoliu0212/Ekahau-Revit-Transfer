@@ -5,6 +5,58 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.6.3] — 2026-06-01
+
+### Fixed (root cause for the persistent "APs don't match image" symptom)
+
+**Background.** The user's `.esx` (`Related Digital Michigan 20251119.0`) ships a bitmap that's the full Revit Sheet (5000×3571 JPEG with title block + notes on the right + floor plan in the center-left). Our previous ESX Align flow placed the FULL bitmap in Revit. The user did 2-point visual cal on the floor-plan portion of the bitmap (works for the image), but AP markers were placed at fp-coord-derived positions that landed on the bitmap's design-area content — which doesn't match the Revit walls because the bitmap rendered the design area at a different physical scale than the visible Revit walls span.
+
+Inspection of the .esx confirmed the data needed to fix this is right there: `floorPlans.json` has `cropMinX/Y..cropMaxX/Y` (= `(153.6, 849.3)..(2748.9, 1962.2)` in fp space units) — Ekahau's "design area" selection, the same region shown in their heat-map view. All 360 APs fit inside this region.
+
+### Changed
+
+- **Bitmap cropped to design area in Align mode.** New `ImageNormalizer.CropToDesignArea(bytes, fpW, fpH, cropMin/Max, out info)` runs after `NormalizeForRevit` when `Mode == EsxReadMode.Align`. Crops the bitmap in WIC to just the design region (e.g., user's file: 5000×3571 → 4292×1839). The displayed image is now what Ekahau Pro shows in its heat-map view — no title block, no notes, no whitespace. Visual cal happens on the same content the user expects.
+
+- **AP coords now use the user-proposed direct image-params transform** (Bug Fix from user). After visual cal, `OfferVisualAlignmentCoreImpl` stores six new fields on `fp` — `AlignedImageCenterX/Y, AlignedImageWidthFt/HeightFt, AlignedCosR/SinR` — that capture the exact pose the image was placed at. The AP-placement loop reads these directly and computes world positions via:
+
+  ```csharp
+  // 1. fp coord → crop fraction
+  uFrac = (apX - cropMinX) / (cropMaxX - cropMinX)
+  vFrac = (apY - cropMinY) / (cropMaxY - cropMinY)
+  // 2. → ft offset from image center (Y-flipped)
+  dxFt = (uFrac - 0.5) * imgWidthFt
+  dyFt = -(vFrac - 0.5) * imgHeightFt
+  // 3. → world (rotate around image center)
+  wx = imgCenterX + dxFt * cosR - dyFt * sinR
+  wy = imgCenterY + dxFt * sinR + dyFt * cosR
+  ```
+
+  Bypasses `BuildEkahauToRevitXform` entirely — eliminates the layer of indirection where bugs could hide. AP markers are now guaranteed to land on the same pixels of the placed image, by construction.
+
+- **Quick mode / Legacy ESX Read mode unchanged** — these don't crop, and continue using `BuildEkahauToRevitXform` with the `revitAnchor` from the .esx (round-trip case where this all works fine).
+
+- **DiagLog records the path explicitly** for every AP placement run:
+  ```
+  [ESX Read] AP transform path: DIRECT image-params (imgCenter=(-300.45, -647.71), size=(1804.32x773.21), rot=-0.03°, crop=(153.6, 849.3)..(2748.9, 1962.2))
+  ```
+
+### Removed
+
+- **4-click "Translation + rotation" re-align** option (added in v2.6.2). It required the user to pair AP markers with bitmap features, which is impossible in ESX Align because there are no existing APs in the Revit model to use as reference and the bitmap doesn't label individual AP positions.
+
+- **Legacy "ESX Read" ribbon button.** Three buttons for the same task was confusing. The two focused buttons (`ESX Quick` for round-trip files with `revitAnchor`, `ESX Align` for external Ekahau projects) cover every case. The underlying `EsxReadCommand` class is kept as the engine both wrapper commands delegate to — any user macro / Dynamo script that invokes it by class name still works.
+
+### Kept
+
+- **2-click translation Nudge** is still in the AP Position Check dialog. With v2.6.3's crop fix the cropped-image-based AP transform should land APs correctly without it, but Nudge stays as a safety net for any residual offset (e.g., sub-pixel rounding, or floor plans where the user wants to fine-tune position).
+
+### Why the crop is gated to Align mode only
+ESX Quick (round-trip from ESX Export) ships a Revit-exported PNG that's already just the floor plan content — no title block, no padding. The existing `revitAnchor` was computed on the full PNG. Cropping that wouldn't help and would break the existing transform. Legacy ESX Read keeps pre-v2.6.0 behaviour for muscle-memory continuity.
+
+### Verification: extracted+cropped bitmap with all 360 APs overlaid
+
+Running the new crop + direct transform offline on the user's file produces a 4292×1839 image (down from 5000×3571 — the entire design area, no title block). All 360 AP positions overlay cleanly on the floor plan structure, matching the Ekahau Pro heat-map view.
+
 ## [2.6.2] — 2026-05-26
 
 ### Added — Full 4-click re-align (translation + rotation)
