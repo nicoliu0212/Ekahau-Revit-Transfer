@@ -5,6 +5,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.6.4] — 2026-06-01
+
+### Added — Auto-zoom to fit the placed image before every confirmation dialog
+After 4-click visual cal / image overlay placement / Nudge correction, the Revit view stayed at whatever zoom + position the user's last interaction left it at — often a tiny patch around the last click point. The "does this look right?" dialogs then asked them to confirm alignment without giving them a chance to see the whole floor plan first.
+
+v2.6.4 calls a new `ZoomToPlacedImage` helper before every confirmation dialog:
+
+| Dialog | When the zoom fires |
+|---|---|
+| `Visual Alignment — Verify` ("Alignment correct — continue") | After 4-click visual cal re-places the rotated image, in `OfferVisualAlignmentCoreImpl`. |
+| `ESX Read — Verify Alignment` ("Alignment looks correct — continue") | After `PlaceFloorPlanImage` places the overlay, in `PlaceImageAndAskForVerification`. |
+| `ESX Read — AP Position Check` (re-shown after a Nudge apply) | After the Nudge `MoveElements` transaction commits, before the outer dialog loops back. |
+
+The helper:
+1. Computes the four rotated corners of the image (using the image's center / width / height / cosR / sinR).
+2. Builds an AABB from those corners + a 10% padding margin.
+3. Looks up the matching `UIView` for the floor plan view.
+4. Calls `UIView.ZoomAndCenterRectangle(p1, p2)`.
+5. Refreshes the view.
+
+Never throws — zoom is a UX nicety, not a correctness requirement.  On failure (no matching UIView, or any exception) it logs to DebugView and falls back to a plain `RefreshActiveView`.
+
+### Diagnostic
+```
+[ESX Read] ZoomToPlacedImage: (-1351.20,-1398.69)..(750.29,102.79) ft (+pad 10%)
+```
+
 ## [2.6.3] — 2026-06-01
 
 ### Fixed (root cause for the persistent "APs don't match image" symptom)

@@ -2740,6 +2740,25 @@ namespace EkahauRevitPlugin
                                         }
                                         moveTx.Commit();
                                         DiagLog($"[ESX Read] Nudge applied: moved {moved} elements, skipped {skipped}.");
+
+                                        // v2.6.4: zoom to the placed image's AABB so
+                                        // the user sees the whole floor plan when the
+                                        // outer "AP Position Check" dialog re-opens.
+                                        try
+                                        {
+                                            var aZN = fp.RevitAnchor;
+                                            if (aZN != null && aZN.CropWorldMaxX_ft > aZN.CropWorldMinX_ft &&
+                                                               aZN.CropWorldMaxY_ft > aZN.CropWorldMinY_ft)
+                                            {
+                                                double zcx = (aZN.CropWorldMinX_ft + aZN.CropWorldMaxX_ft) / 2.0;
+                                                double zcy = (aZN.CropWorldMinY_ft + aZN.CropWorldMaxY_ft) / 2.0;
+                                                double zw  = aZN.CropWorldMaxX_ft  - aZN.CropWorldMinX_ft;
+                                                double zh  = aZN.CropWorldMaxY_ft  - aZN.CropWorldMinY_ft;
+                                                ZoomToPlacedImage(uiDoc, view, zcx, zcy, zw, zh);
+                                                DoEvents();
+                                            }
+                                        }
+                                        catch { }
                                     }
                                     catch (Exception nudgeEx)
                                     {
@@ -3073,6 +3092,27 @@ namespace EkahauRevitPlugin
             }
             catch { }
 
+            // v2.6.4: zoom to fit the placed image so the user can see
+            // the whole floor plan before the verification dialog asks
+            // "does this look right?".  Uses the anchor's CropWorld
+            // AABB which matches where PlaceFloorPlanImage put the
+            // image (both for Align-cropped and Legacy un-cropped).
+            try
+            {
+                var aZ = fp.RevitAnchor;
+                if (aZ != null && aZ.CropWorldMaxX_ft > aZ.CropWorldMinX_ft &&
+                                  aZ.CropWorldMaxY_ft > aZ.CropWorldMinY_ft)
+                {
+                    double zcx = (aZ.CropWorldMinX_ft + aZ.CropWorldMaxX_ft) / 2.0;
+                    double zcy = (aZ.CropWorldMinY_ft + aZ.CropWorldMaxY_ft) / 2.0;
+                    double zw  = aZ.CropWorldMaxX_ft  - aZ.CropWorldMinX_ft;
+                    double zh  = aZ.CropWorldMaxY_ft  - aZ.CropWorldMinY_ft;
+                    ZoomToPlacedImage(uiDoc, view, zcx, zcy, zw, zh);
+                    DoEvents();
+                }
+            }
+            catch { }
+
             // ── 5. Verification dialog ──
             //   v2.6.0: Quick Import mode skips this dialog (Option B per
             //   the design — place the overlay so the user can see it but
@@ -3353,6 +3393,104 @@ namespace EkahauRevitPlugin
                 File.AppendAllText(_diagLogPath.Value, $"[{ts}] {message}\n");
             }
             catch { /* don't break the workflow on log failure */ }
+        }
+
+        // ──────────────────────────────────────────────────────────────
+        //  v2.6.4 Zoom-to-image helper
+        //
+        //  After visual cal / Nudge / re-place, the Revit view stays at
+        //  the zoom level + position where the user clicked their last
+        //  point.  That leaves them looking at a tiny patch when we
+        //  pop a verification dialog asking "does this look right?".
+        //  Zoom to the placed-image's AABB (with a small padding) so
+        //  the whole image is visible before any confirm dialog.
+        //
+        //  Never throws — zoom is a UX convenience, not a correctness
+        //  requirement.  Failures are logged via Debug.WriteLine and
+        //  swallowed.
+        // ──────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Zoom the given view to fit the rectangle defined by an image
+        /// placed at <paramref name="centerX"/>/<paramref name="centerY"/>
+        /// with the given physical size + rotation.  Adds 10% padding
+        /// (configurable) around the image so it doesn't touch the
+        /// viewport edges.
+        ///
+        /// Falls back to a refresh-only on any failure — the user can
+        /// still pan/zoom manually.
+        /// </summary>
+        private static void ZoomToPlacedImage(
+            UIDocument uiDoc, View view,
+            double centerX, double centerY,
+            double widthFt, double heightFt,
+            double cosR = 1.0, double sinR = 0.0,
+            double paddingFraction = 0.10)
+        {
+            try
+            {
+                // Compute the four rotated corners of the image, then AABB.
+                double halfW = widthFt  / 2.0;
+                double halfH = heightFt / 2.0;
+                double minX = double.MaxValue, minY = double.MaxValue;
+                double maxX = double.MinValue, maxY = double.MinValue;
+                var corners = new[]
+                {
+                    (-halfW, -halfH), ( halfW, -halfH),
+                    ( halfW,  halfH), (-halfW,  halfH),
+                };
+                foreach (var (cx, cy) in corners)
+                {
+                    double wx = centerX + cx * cosR - cy * sinR;
+                    double wy = centerY + cx * sinR + cy * cosR;
+                    if (wx < minX) minX = wx;
+                    if (wy < minY) minY = wy;
+                    if (wx > maxX) maxX = wx;
+                    if (wy > maxY) maxY = wy;
+                }
+                double padX = (maxX - minX) * paddingFraction;
+                double padY = (maxY - minY) * paddingFraction;
+                var p1 = new XYZ(minX - padX, minY - padY, 0);
+                var p2 = new XYZ(maxX + padX, maxY + padY, 0);
+
+                // Match the active UIView by view id (.GetOpenUIViews
+                // returns one entry per open viewport — we need ours).
+                var uiViews = uiDoc.GetOpenUIViews();
+                UIView target = null;
+                foreach (var uv in uiViews)
+                {
+                    if (uv.ViewId == view.Id) { target = uv; break; }
+                }
+                if (target == null)
+                {
+                    // Fall back: make the view active so a viewport
+                    // exists for it, then re-query.
+                    try { uiDoc.ActiveView = view; } catch { }
+                    uiViews = uiDoc.GetOpenUIViews();
+                    foreach (var uv in uiViews)
+                    {
+                        if (uv.ViewId == view.Id) { target = uv; break; }
+                    }
+                }
+
+                if (target != null)
+                {
+                    target.ZoomAndCenterRectangle(p1, p2);
+                    try { uiDoc.RefreshActiveView(); } catch { }
+                    Debug.WriteLine(
+                        $"[ESX Read] ZoomToPlacedImage: ({minX:F2},{minY:F2})..({maxX:F2},{maxY:F2}) ft " +
+                        $"(+pad {paddingFraction * 100:F0}%)");
+                }
+                else
+                {
+                    Debug.WriteLine("[ESX Read] ZoomToPlacedImage: no matching UIView, skipped.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[ESX Read] ZoomToPlacedImage failed: {ex.Message}");
+                try { uiDoc.RefreshActiveView(); } catch { }
+            }
         }
 
         /// <summary>
@@ -4119,6 +4257,14 @@ namespace EkahauRevitPlugin
                 Debug.WriteLine($"[ESX Read] Image re-placement failed: {ex.Message}");
             }
             try { uiDoc.RefreshActiveView(); DoEvents(); } catch { }
+
+            // v2.6.4: zoom to fit the aligned image so the user can see
+            // the whole floor plan before deciding if alignment is OK.
+            // (Without this they're left looking at the last click point.)
+            ZoomToPlacedImage(uiDoc, view,
+                newCenterX, newCenterY, newWidthFt, newHeightFt,
+                cosR, sinR, paddingFraction: 0.10);
+            DoEvents();
 
             // ── 8. Verification dialog (continue / retry / cancel) ─
             var verify = new TaskDialog("Visual Alignment — Verify")
