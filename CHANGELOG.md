@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.7.1] — 2026-06-04
+
+### Fixed — CI build broken in v2.7.0 (no MSI shipped)
+Two compile errors in v2.7.0 that the local SDKs were too old to catch:
+
+- **`EsxAlignSetupDialog.cs`** had 6 lines using `Grid` and `Grid.SetColumn(...)` that the compiler refused: `'Grid' is an ambiguous reference between 'System.Windows.Controls.Grid' and 'Autodesk.Revit.DB.Grid'`.  The `using Autodesk.Revit.DB;` at the top of the dialog file dragged in Revit's `Grid` (grid line) which collided with the WPF `Grid` layout control.  Fix: add `using WpfGrid = System.Windows.Controls.Grid;` alias and replace every `new Grid(...)` / `Grid.SetColumn(...)` reference with `WpfGrid`.
+- **`EsxReadCommand.cs:4059`** had a pre-existing dead `return null;` immediately after a `throw new InvalidOperationException(...)`.  Older SDKs accepted it as a warning; the newer Revit-2026 SDK build chain treats it as an error.  Fix: drop the line.
+
+No behavioural changes from v2.7.0 — purely the compile fix.
+
 ## [2.7.0] — 2026-06-04
 
 ### Changed — ESX Align: complete UX rewrite (17 dialogs → 3)

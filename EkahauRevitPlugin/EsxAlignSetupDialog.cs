@@ -5,12 +5,14 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 
-// WPF control aliases — Autodesk.Revit.UI also defines ComboBox, TextBox, etc.
+// WPF control aliases — Autodesk.Revit.UI / DB also define ComboBox,
+// TextBox, Grid, etc.  Disambiguate every WPF control name we use.
 using WpfComboBox     = System.Windows.Controls.ComboBox;
 using WpfComboBoxItem = System.Windows.Controls.ComboBoxItem;
 using WpfListBox      = System.Windows.Controls.ListBox;
 using WpfListBoxItem  = System.Windows.Controls.ListBoxItem;
 using WpfTextBox      = System.Windows.Controls.TextBox;
+using WpfGrid         = System.Windows.Controls.Grid;
 
 using Autodesk.Revit.DB;
 
@@ -113,7 +115,7 @@ namespace EkahauRevitPlugin
             });
 
             // Horizontal layout: TextBox (stretches) + Browse button (fixed)
-            var fileGrid = new Grid();
+            var fileGrid = new WpfGrid();
             fileGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             fileGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
@@ -127,13 +129,13 @@ namespace EkahauRevitPlugin
                 VerticalContentAlignment = VerticalAlignment.Center,
                 Foreground = Brush("#555555"),
             };
-            Grid.SetColumn(_txbFile, 0);
+            WpfGrid.SetColumn(_txbFile, 0);
             fileGrid.Children.Add(_txbFile);
 
             var btnBrowse = MakeButton("  Browse…  ", "#EEEEEE", "#333333");
             btnBrowse.Click += BtnBrowse_Click;
             btnBrowse.Padding = new Thickness(12, 4, 12, 4);
-            Grid.SetColumn(btnBrowse, 1);
+            WpfGrid.SetColumn(btnBrowse, 1);
             fileGrid.Children.Add(btnBrowse);
 
             filePanel.Children.Add(fileGrid);
@@ -142,7 +144,7 @@ namespace EkahauRevitPlugin
             // ── Floor plan + View selection (side-by-side Grid) ────────
             var selPanel = new StackPanel { Margin = new Thickness(12, 4, 12, 8) };
 
-            var selGrid = new Grid { Height = 240 };
+            var selGrid = new WpfGrid{ Height = 240 };
             selGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             selGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(12) });
             selGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -167,7 +169,7 @@ namespace EkahauRevitPlugin
             ScrollViewer.SetVerticalScrollBarVisibility(_lstFloors, ScrollBarVisibility.Auto);
             _lstFloors.SelectionChanged += LstFloors_SelectionChanged;
             leftCol.Children.Add(_lstFloors);
-            Grid.SetColumn(leftCol, 0);
+            WpfGrid.SetColumn(leftCol, 0);
             selGrid.Children.Add(leftCol);
 
             // Right column: Revit views
@@ -212,7 +214,7 @@ namespace EkahauRevitPlugin
             };
             rightCol.Children.Add(rightFiller);
 
-            Grid.SetColumn(rightCol, 2);
+            WpfGrid.SetColumn(rightCol, 2);
             selGrid.Children.Add(rightCol);
 
             selPanel.Children.Add(selGrid);

@@ -4056,7 +4056,6 @@ namespace EkahauRevitPlugin
                 TryDeleteFile(imgPath);
                 throw new InvalidOperationException(
                     $"Could not place initial image overlay: {ex.Message}", ex);
-                return null;
             }
 
             // Make sure the image is visible to the user
