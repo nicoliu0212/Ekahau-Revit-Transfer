@@ -5,6 +5,47 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.7.0] — 2026-06-04
+
+### Changed — ESX Align: complete UX rewrite (17 dialogs → 3)
+
+The old ESX Align flow required the user to navigate through 17 sequential interactions before a single AP marker was placed.  v2.7.0 collapses that into **3 dialogs + 4 PickPoint clicks**:
+
+```
+1. EsxAlignSetupDialog       — file + floor + view, all in one WPF window
+2. 4-point visual cal        — status-bar prompts only, no popups between picks
+3. ESX Align — Result        — Done / Nudge / Redo
+```
+
+### Implementation
+
+- New file **`EsxAlignSetupDialog.cs`** (procedural WPF, matches project style).  Browse → background `EsxZipReader` parse → auto-populates floor list with AP counts → auto-selects first AP-bearing floor → auto-matches view by name.  Start button enabled only when all three selections are valid.
+- New static helper **`EsxMarkerOps.PreScaleImageToCropBox(view, pixelW, pixelH, padding)`**.  Fits image dimensions to the view's CropBox with 5% padding — guarantees the image is visible before the user starts picking, regardless of how garbage the .esx `metersPerUnit` value is.  Defensive fallback to a 200 ft default when CropBox is unavailable.
+- New private method **`EsxReadCommand.RunAlignWorkflow(uiDoc)`** drives the new flow end-to-end.  Mode dispatch added at the top of `Execute()`: when `Mode == EsxReadMode.Align`, it returns `RunAlignWorkflow()` and skips the legacy body entirely.  Quick / LegacyAuto modes are **untouched** — same code path as v2.6.4.
+- The 4-point pick uses `Selection.PickPoint(prompt)` prompts only.  No "Pair 1 captured" intermediate dialog, no rotation picker after, no AP review.  ESC at any point skips alignment (image stays at CropBox centre, AP markers placed without rotation).
+- Result dialog has **3 commands** in one place:
+  - **Done** — saves staging JSON, closes
+  - **Nudge** — single 2-click translation correction, immediately applied, loops back to result dialog
+  - **Redo** — deletes everything created this run and goes back to image placement + 4-pick
+- AP placement uses the **direct image-params transform** introduced in v2.6.3 — bypasses `BuildEkahauToRevitXform` and uses `(newCenterX, newCenterY, newWidthFt, newHeightFt, cosR, sinR)` from the visual cal directly.
+
+### Removed
+
+- AP rotation picker dialog (UP / RIGHT / LEFT / DOWN) — no longer needed; rotation comes from the 4-point pick.
+- AP Review dialog (per-AP checkbox list) — all APs on the selected floor are placed.  If users need to filter, they can edit the .esx in Ekahau Pro first.
+- All conditional warning dialogs (`Quick Import would work too`, `No Access Points`, `Unusual Rotation`, `No APs on this floor`, `Manual Adjustment` notice).  The new flow only surfaces dialogs when input is actually invalid.
+- "Pair 1 captured" mid-pick TaskDialog.
+
+### What's preserved
+
+- Quick mode (`ESX Quick` button) — completely unchanged from v2.6.4.  Round-trip imports with `revitAnchor` still get their fast 3-step flow.
+- Legacy mode (`EsxReadCommand` invoked directly via class name from macros) — still works; uses the original Execute() body.
+- All existing helpers (`PlaceApMarker`, `CleanupMarkers`, `LookupImageBytes`, `ImageNormalizer.*`, `ZoomToPlacedImage`, `VersionCompat.CreateImageType`, etc.) — reused as-is in the new orchestrator.
+- Staging JSON schema — unchanged (no `FormatVersion` bump).  AP Place reads it the same way.
+
+### Why a minor bump
+The Align workflow is essentially rewritten, but Quick mode and the IExternalCommand class names are unchanged.  Users with macros or Dynamo scripts that invoke `EsxReadCommand` / `EsxReadQuickCommand` see no change.  Only the interactive ESX Align experience is different (faster).
+
 ## [2.6.4] — 2026-06-01
 
 ### Added — Auto-zoom to fit the placed image before every confirmation dialog

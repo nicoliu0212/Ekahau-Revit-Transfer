@@ -1699,6 +1699,94 @@ namespace EkahauRevitPlugin
             return imgInst.Id;
         }
 
+        // ──────────────────────────────────────────────────────────────
+        //  v2.7.0 — Pre-scale image to view's CropBox
+        //
+        //  Ekahau .esx files often have a metersPerUnit value derived from
+        //  an invalid PDF calibration, so the image — sized via that value
+        //  — can end up completely invisible (microns wide, or larger than
+        //  the building).  For the new ESX Align flow we don't trust
+        //  metersPerUnit on first placement: we fit the image to the
+        //  matched view's CropBox + padding so it's guaranteed visible
+        //  for the user to do their 2-point alignment pick on.
+        //
+        //  Defensive fallbacks for null/invalid CropBox — never throws.
+        // ──────────────────────────────────────────────────────────────
+        public static (double WidthFt, double HeightFt, string DiagReason)
+            PreScaleImageToCropBox(
+                ViewPlan view,
+                int imagePixelW, int imagePixelH,
+                double paddingFraction = 0.05)
+        {
+            const double DefaultWidthFt = 200.0;
+
+            try
+            {
+                if (view == null || !view.CropBoxActive)
+                {
+                    double aspect = (double)imagePixelW / Math.Max(imagePixelH, 1);
+                    return (DefaultWidthFt, DefaultWidthFt / aspect,
+                        "CropBox unavailable (view null or CropBoxActive=false), fell back to 200 ft default");
+                }
+
+                var cropBox = view.CropBox;
+                if (cropBox == null)
+                {
+                    double aspect = (double)imagePixelW / Math.Max(imagePixelH, 1);
+                    return (DefaultWidthFt, DefaultWidthFt / aspect,
+                        "CropBox is null, fell back to 200 ft default");
+                }
+
+                double cropBoxW = cropBox.Max.X - cropBox.Min.X;
+                double cropBoxH = cropBox.Max.Y - cropBox.Min.Y;
+
+                if (cropBoxW <= 0 || cropBoxH <= 0)
+                {
+                    double aspect = (double)imagePixelW / Math.Max(imagePixelH, 1);
+                    return (DefaultWidthFt, DefaultWidthFt / aspect,
+                        $"CropBox extents non-positive ({cropBoxW:F2}x{cropBoxH:F2} ft), fell back to 200 ft default");
+                }
+
+                double usableW = cropBoxW * (1.0 - 2.0 * paddingFraction);
+                double usableH = cropBoxH * (1.0 - 2.0 * paddingFraction);
+                if (usableW <= 0 || usableH <= 0)
+                {
+                    usableW = cropBoxW;
+                    usableH = cropBoxH;
+                    paddingFraction = 0;
+                }
+
+                double imageAspect = (double)imagePixelW / Math.Max(imagePixelH, 1);
+                double cropAspect  = usableW / usableH;
+                double resultWidthFt, resultHeightFt;
+                if (imageAspect > cropAspect)
+                {
+                    // Image wider than usable rectangle → constrain by width.
+                    resultWidthFt  = usableW;
+                    resultHeightFt = usableW / imageAspect;
+                }
+                else
+                {
+                    // Image taller than usable rectangle → constrain by height.
+                    resultHeightFt = usableH;
+                    resultWidthFt  = usableH * imageAspect;
+                }
+
+                string reason =
+                    $"fit to CropBox {cropBoxW:F1}x{cropBoxH:F1} ft, " +
+                    $"{paddingFraction * 100:F0}% pad → image {resultWidthFt:F1}x{resultHeightFt:F1} ft";
+                Debug.WriteLine($"[ESX MarkerOps] PreScaleImageToCropBox: {reason}");
+                return (resultWidthFt, resultHeightFt, reason);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[ESX MarkerOps] PreScaleImageToCropBox threw: {ex.Message}");
+                double aspect = (double)imagePixelW / Math.Max(imagePixelH, 1);
+                return (DefaultWidthFt, DefaultWidthFt / aspect,
+                    $"exception in PreScaleImageToCropBox ({ex.Message}), fell back to 200 ft default");
+            }
+        }
+
         /// <summary>
         /// Draw four green "+" reference crosses at the world-space corners
         /// of the CropBox.  These should align exactly with the corners of
@@ -1819,6 +1907,31 @@ namespace EkahauRevitPlugin
         {
             UIDocument uiDoc = commandData.Application.ActiveUIDocument;
             Document   doc   = uiDoc.Document;
+
+            // v2.7.0: ESX Align uses a brand-new streamlined workflow
+            // (3 dialogs + 4 PickPoints instead of 17 interactive steps).
+            // Quick + LegacyAuto modes continue down the existing path.
+            if (Mode == EsxReadMode.Align)
+            {
+                try
+                {
+                    return RunAlignWorkflow(uiDoc);
+                }
+                catch (Exception ex)
+                {
+                    DiagLog($"[ESX Align] RunAlignWorkflow threw: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
+                    try
+                    {
+                        TaskDialog.Show("ESX Align — Error",
+                            $"The Align workflow encountered an unexpected error:\n\n" +
+                            $"{ex.GetType().Name}: {ex.Message}\n\n" +
+                            "Check %USERPROFILE%\\Documents\\EkahauRevitPlugin_diag.log " +
+                            "for the full stack trace.");
+                    }
+                    catch { }
+                    return Result.Failed;
+                }
+            }
 
             // ── 1. File open dialog ───────────────────────────────────
             var openDlg = new Microsoft.Win32.OpenFileDialog
@@ -4781,6 +4894,571 @@ namespace EkahauRevitPlugin
             System.Windows.Threading.Dispatcher.CurrentDispatcher.Invoke(
                 System.Windows.Threading.DispatcherPriority.Background,
                 new Action(() => { }));
+        }
+
+        // ══════════════════════════════════════════════════════════════════
+        //  v2.7.0 — Streamlined ESX Align workflow
+        //
+        //  3 dialogs + 4 PickPoints (down from 17 interactive steps):
+        //    1. EsxAlignSetupDialog — file + floor + view
+        //    2. 4-point visual cal (status-bar prompts only)
+        //    3. Result dialog — Done / Nudge / Redo
+        //
+        //  Only invoked when Mode == EsxReadMode.Align.  Quick / LegacyAuto
+        //  fall through to the existing Execute() body.
+        // ══════════════════════════════════════════════════════════════════
+
+        private Result RunAlignWorkflow(UIDocument uiDoc)
+        {
+            Document doc = uiDoc.Document;
+            DiagLog($"\n========== ESX Align — v{VersionInfo.Version} session ==========");
+
+            // ── Phase 1: Setup dialog ─────────────────────────────────
+            var revitViews = new FilteredElementCollector(doc)
+                .OfClass(typeof(ViewPlan))
+                .Cast<ViewPlan>()
+                .Where(v => !v.IsTemplate && v.ViewType == ViewType.FloorPlan)
+                .OrderBy(v => v.Name)
+                .ToList();
+
+            if (revitViews.Count == 0)
+            {
+                TaskDialog.Show("ESX Align",
+                    "No floor plan views found in the Revit model.\n\n" +
+                    "Open a project with at least one floor plan view first.");
+                return Result.Failed;
+            }
+
+            var setup = new EsxAlignSetupDialog(revitViews);
+            if (setup.ShowDialog() != true)
+            {
+                DiagLog("[ESX Align] User cancelled setup dialog.");
+                return Result.Cancelled;
+            }
+
+            string esxPath = setup.EsxFilePath;
+            var    esxData = setup.ParsedEsxData;
+            var    fp      = setup.SelectedFloor;
+            var    view    = setup.SelectedView;
+
+            DiagLog($"[ESX Align] Setup: file='{esxPath}', floor='{fp.Name}', view='{view.Name}'");
+
+            // Apply DWG-import fallback (sets anchor on fp if a sidecar exists).
+            TryApplyDwgCalibrationFallback(esxData, esxPath);
+
+            // Make the view active so PickPoint targets the right viewport.
+            try { uiDoc.ActiveView = view; } catch { }
+            DoEvents();
+
+            // ── Outer "redo" loop: each pass = one full alignment run ──
+            var floorResult = new EsxReadFloorResult
+            {
+                FloorPlanName   = fp.Name,
+                MatchedViewName = view.Name,
+            };
+            var stagingFloor = new ApStagingFloor
+            {
+                FloorPlanName     = fp.Name,
+                ViewName          = view.Name,
+                ViewId            = VersionCompat.GetIdValue(view.Id),
+                OverlayElementIds = new List<long>(),
+            };
+            var allCreatedIds = new List<ElementId>();
+            bool wfDone = false;
+
+            while (!wfDone)
+            {
+                // Reset per-iteration state so a "Redo" re-uses the same
+                // staging container but starts from a clean view.
+                CleanupOldEkMarkers(doc, view);
+                allCreatedIds.Clear();
+                stagingFloor.AccessPoints.Clear();
+                stagingFloor.OverlayElementIds.Clear();
+                fp.AlignedImageCenterX = null;
+                fp.AlignedImageCenterY = null;
+                fp.AlignedImageWidthFt = null;
+                fp.AlignedImageHeightFt = null;
+                fp.AlignedCosR = null;
+                fp.AlignedSinR = null;
+                fp.CropApplied = false;
+
+                // ── Phase 2a: image bytes → SVG → crop → WIC → temp file ──
+                byte[] imgBytes = LookupImageBytes(esxData, fp);
+                if (imgBytes == null || imgBytes.Length < 100)
+                {
+                    TaskDialog.Show("ESX Align",
+                        $"The .esx file has no usable floor-plan image for '{fp.Name}'.\n\n" +
+                        $"Looked up image '{fp.ImageId}' in {esxData.ImageEntries.Count} entries.");
+                    return Result.Failed;
+                }
+                var svgNorm = ImageNormalizer.NormalizeIfSvg(imgBytes);
+                if (svgNorm.WasSvg && !svgNorm.ExtractionSucceeded)
+                {
+                    TaskDialog.Show("ESX Align — SVG without embedded raster",
+                        "The floor plan is stored as SVG without an embedded raster the plugin " +
+                        "can extract.  Re-save the floor plan with PNG output in Ekahau Pro.");
+                    return Result.Failed;
+                }
+                imgBytes = svgNorm.Bytes;
+
+                imgBytes = ImageNormalizer.NormalizeForRevit(imgBytes, out string normDetail);
+                DiagLog($"[ESX Align] WIC re-encode: {normDetail}");
+
+                // Crop to design area (uses fp.CropMin/Max from floorPlans.json).
+                var croppedBytes = ImageNormalizer.CropToDesignArea(
+                    imgBytes, fp.Width, fp.Height,
+                    fp.CropMinX, fp.CropMinY, fp.CropMaxX, fp.CropMaxY,
+                    out var cropInfo);
+                DiagLog($"[ESX Align] Design-area crop: {cropInfo.Reason}");
+                if (cropInfo.WasCropped && croppedBytes != null && croppedBytes.Length > 100)
+                {
+                    imgBytes = croppedBytes;
+                    fp.CropApplied       = true;
+                    fp.CropAppliedMinFpX = cropInfo.FpCropMinX;
+                    fp.CropAppliedMinFpY = cropInfo.FpCropMinY;
+                    fp.CropAppliedMaxFpX = cropInfo.FpCropMaxX;
+                    fp.CropAppliedMaxFpY = cropInfo.FpCropMaxY;
+                }
+                else
+                {
+                    fp.CropAppliedMinFpX = 0;
+                    fp.CropAppliedMinFpY = 0;
+                    fp.CropAppliedMaxFpX = fp.Width;
+                    fp.CropAppliedMaxFpY = fp.Height;
+                }
+
+                string ext = ImageNormalizer.DetectExtension(imgBytes);
+                string imgPath = Path.Combine(Path.GetTempPath(),
+                    $"EkahauAlign_{Guid.NewGuid():N}{ext}");
+                try { File.WriteAllBytes(imgPath, imgBytes); }
+                catch (Exception ex)
+                {
+                    TaskDialog.Show("ESX Align", $"Could not stage image file:\n{ex.Message}");
+                    return Result.Failed;
+                }
+
+                var (imgPxW, imgPxH) = ReadImageDimensions(imgPath);
+                if (imgPxW <= 0 || imgPxH <= 0)
+                {
+                    TaskDialog.Show("ESX Align",
+                        $"Could not determine image dimensions for the cropped floor plan.\n\n" +
+                        $"File: {imgPath}\nFile size: {new FileInfo(imgPath).Length:N0} bytes");
+                    TryDeleteFile(imgPath);
+                    return Result.Failed;
+                }
+
+                // ── Phase 2b: pre-scale image to fit the view's CropBox ──
+                var (preW, preH, preReason) =
+                    EsxMarkerOps.PreScaleImageToCropBox(view, imgPxW, imgPxH);
+                DiagLog($"[ESX Align] PreScale: {preReason}");
+
+                // Compute initial centre at the view's CropBox centre.
+                double initCenterX, initCenterY;
+                try
+                {
+                    var cb = view.CropBox;
+                    var t  = cb.Transform;
+                    var c0 = t.OfPoint(new XYZ(cb.Min.X, cb.Min.Y, 0));
+                    var c1 = t.OfPoint(new XYZ(cb.Max.X, cb.Min.Y, 0));
+                    var c2 = t.OfPoint(new XYZ(cb.Max.X, cb.Max.Y, 0));
+                    var c3 = t.OfPoint(new XYZ(cb.Min.X, cb.Max.Y, 0));
+                    initCenterX = (c0.X + c1.X + c2.X + c3.X) / 4.0;
+                    initCenterY = (c0.Y + c1.Y + c2.Y + c3.Y) / 4.0;
+                }
+                catch
+                {
+                    initCenterX = 0;
+                    initCenterY = 0;
+                }
+                double zElev = view.GenLevel?.Elevation ?? 0;
+
+                // ── Phase 2c: place the initial image at CropBox centre ──
+                ElementId initImgId = null;
+                try
+                {
+                    using var tx = new Transaction(doc, "ESX Align — Initial Image");
+                    tx.Start();
+                    var imgType = VersionCompat.CreateImageType(doc, imgPath, out var imgTypeErr);
+                    if (imgType == null)
+                    {
+                        tx.RollBack();
+                        TaskDialog.Show("ESX Align — ImageType.Create failed",
+                            "Revit could not create an ImageType from the staged file.\n\n" +
+                            (imgTypeErr != null ? $"Underlying: {imgTypeErr.GetType().Name}: {imgTypeErr.Message}\n\n" : "") +
+                            $"Temp file: {imgPath}");
+                        TryDeleteFile(imgPath);
+                        return Result.Failed;
+                    }
+                    var opts = new ImagePlacementOptions(
+                        new XYZ(initCenterX, initCenterY, zElev), BoxPlacement.Center);
+                    var inst = ImageInstance.Create(doc, view, imgType.Id, opts);
+                    try { inst.Width = preW; } catch { }
+                    initImgId = inst.Id;
+                    allCreatedIds.Add(initImgId);
+                    tx.Commit();
+                }
+                catch (Exception ex)
+                {
+                    TryDeleteFile(imgPath);
+                    TaskDialog.Show("ESX Align", $"Could not place initial image:\n{ex.Message}");
+                    return Result.Failed;
+                }
+
+                // Zoom + refresh so the user sees the placed image.
+                ZoomToPlacedImage(uiDoc, view, initCenterX, initCenterY, preW, preH);
+                DoEvents();
+
+                // ── Phase 3: 4-point visual alignment (status-bar prompts) ──
+                double newCenterX = initCenterX, newCenterY = initCenterY;
+                double newWidthFt = preW,       newHeightFt = preH;
+                double cosR = 1.0, sinR = 0.0;
+                bool aligned = false;
+
+                XYZ modelPt1 = null, imagePt1 = null, modelPt2 = null, imagePt2 = null;
+                try
+                {
+                    modelPt1 = uiDoc.Selection.PickPoint(
+                        "PAIR 1 of 2 — click a reference point on the REVIT MODEL " +
+                        "(e.g. building corner, column) — ESC to skip alignment");
+                    imagePt1 = uiDoc.Selection.PickPoint(
+                        "PAIR 1 of 2 — click the SAME point on the floor-plan IMAGE");
+                    modelPt2 = uiDoc.Selection.PickPoint(
+                        "PAIR 2 of 2 — click ANOTHER point on the REVIT MODEL (far from Pair 1)");
+                    imagePt2 = uiDoc.Selection.PickPoint(
+                        "PAIR 2 of 2 — click the SAME point on the floor-plan IMAGE");
+                }
+                catch (Autodesk.Revit.Exceptions.OperationCanceledException)
+                {
+                    DiagLog("[ESX Align] User pressed ESC during PickPoint — skipping alignment.");
+                    modelPt1 = null;   // signal: no alignment
+                }
+
+                if (modelPt1 != null && imagePt1 != null && modelPt2 != null && imagePt2 != null)
+                {
+                    // Convert image-world picks → bitmap pixel coords.
+                    double imgLeft = initCenterX - preW  / 2.0;
+                    double imgTop  = initCenterY + preH  / 2.0;
+                    double placedFtPerPx = preW / imgPxW;
+                    double ek1x_img = (imagePt1.X - imgLeft) / placedFtPerPx;
+                    double ek1y_img = (imgTop - imagePt1.Y) / placedFtPerPx;
+                    double ek2x_img = (imagePt2.X - imgLeft) / placedFtPerPx;
+                    double ek2y_img = (imgTop - imagePt2.Y) / placedFtPerPx;
+
+                    double modelDist = Math.Sqrt(
+                        Math.Pow(modelPt2.X - modelPt1.X, 2) +
+                        Math.Pow(modelPt2.Y - modelPt1.Y, 2));
+                    double ekDist_img = Math.Sqrt(
+                        Math.Pow(ek2x_img - ek1x_img, 2) +
+                        Math.Pow(ek2y_img - ek1y_img, 2));
+
+                    if (modelDist < 1.0 || ekDist_img < 10.0)
+                    {
+                        TaskDialog.Show("ESX Align — Picks too close",
+                            "The two reference pairs are too close together to compute a stable " +
+                            "scale + rotation.  Try again and pick points farther apart.");
+                    }
+                    else
+                    {
+                        double ftPerPx_img = modelDist / ekDist_img;
+                        double modelAngle  = Math.Atan2(modelPt2.Y - modelPt1.Y, modelPt2.X - modelPt1.X);
+                        double ekAngle     = Math.Atan2(-(ek2y_img - ek1y_img), ek2x_img - ek1x_img);
+                        double rotation    = modelAngle - ekAngle;
+                        cosR = Math.Cos(rotation);
+                        sinR = Math.Sin(rotation);
+
+                        double cdx = (imgPxW / 2.0) - ek1x_img;
+                        double cdy = -((imgPxH / 2.0) - ek1y_img);
+                        newCenterX = modelPt1.X + (cdx * cosR - cdy * sinR) * ftPerPx_img;
+                        newCenterY = modelPt1.Y + (cdx * sinR + cdy * cosR) * ftPerPx_img;
+                        newWidthFt  = imgPxW * ftPerPx_img;
+                        newHeightFt = imgPxH * ftPerPx_img;
+
+                        DiagLog($"[ESX Align] Computed: rotation = {rotation * 180.0 / Math.PI:F2}°, " +
+                                $"ftPerPx_img = {ftPerPx_img:F6}, " +
+                                $"newCenter = ({newCenterX:F2}, {newCenterY:F2}) ft, " +
+                                $"newSize = ({newWidthFt:F2}, {newHeightFt:F2}) ft");
+
+                        // ── Re-place the image at the calibrated pose ──
+                        try
+                        {
+                            using var tx2 = new Transaction(doc, "ESX Align — Re-place Image");
+                            tx2.Start();
+                            try { doc.Delete(initImgId); } catch { }
+                            allCreatedIds.Remove(initImgId);
+
+                            var imgType2 = VersionCompat.CreateImageType(doc, imgPath);
+                            if (imgType2 != null)
+                            {
+                                var opts2 = new ImagePlacementOptions(
+                                    new XYZ(newCenterX, newCenterY, zElev), BoxPlacement.Center);
+                                var inst2 = ImageInstance.Create(doc, view, imgType2.Id, opts2);
+                                try { inst2.Width = newWidthFt; } catch { }
+                                initImgId = inst2.Id;
+                                allCreatedIds.Add(initImgId);
+                                if (Math.Abs(rotation) > 1e-4)
+                                {
+                                    var axis = Line.CreateBound(
+                                        new XYZ(newCenterX, newCenterY, zElev),
+                                        new XYZ(newCenterX, newCenterY, zElev + 1));
+                                    ElementTransformUtils.RotateElement(doc, initImgId, axis, rotation);
+                                }
+                            }
+                            tx2.Commit();
+                            aligned = true;
+                        }
+                        catch (Exception ex)
+                        {
+                            DiagLog($"[ESX Align] Re-place failed: {ex.Message}");
+                        }
+                    }
+                }
+
+                // Store aligned image params on fp so AP placement uses
+                // the direct image-params transform (Bug Fix from user).
+                fp.AlignedImageCenterX  = newCenterX;
+                fp.AlignedImageCenterY  = newCenterY;
+                fp.AlignedImageWidthFt  = newWidthFt;
+                fp.AlignedImageHeightFt = newHeightFt;
+                fp.AlignedCosR          = cosR;
+                fp.AlignedSinR          = sinR;
+
+                stagingFloor.OverlayElementIds.Add(VersionCompat.GetIdValue(initImgId));
+                ZoomToPlacedImage(uiDoc, view, newCenterX, newCenterY, newWidthFt, newHeightFt, cosR, sinR);
+                DoEvents();
+
+                // ── Phase 5: place AP markers ─────────────────────────
+                var floorAps = esxData.AccessPoints
+                    .Where(ap => ap.FloorPlanId == fp.Id && ap.Include)
+                    .ToList();
+                int placedCount = 0;
+                int skippedCount = 0;
+                var bandsSeen = new HashSet<string>();
+
+                double xUMin = fp.CropApplied ? fp.CropAppliedMinFpX : 0;
+                double xUMax = fp.CropApplied ? fp.CropAppliedMaxFpX : fp.Width;
+                double xVMin = fp.CropApplied ? fp.CropAppliedMinFpY : 0;
+                double xVMax = fp.CropApplied ? fp.CropAppliedMaxFpY : fp.Height;
+                double xURange = xUMax - xUMin;
+                double xVRange = xVMax - xVMin;
+
+                if (floorAps.Count > 0)
+                {
+                    double markerRadius = EsxMarkerOps.GetAdaptiveRadius(view);
+                    using var tx3 = new Transaction(doc, "ESX Align — Place AP Markers");
+                    tx3.Start();
+                    foreach (var ap in floorAps)
+                    {
+                        try
+                        {
+                            // Direct image-params transform (no
+                            // BuildEkahauToRevitXform indirection).
+                            double uFrac = (ap.PixelX - xUMin) / xURange;
+                            double vFrac = (ap.PixelY - xVMin) / xVRange;
+                            double dxFt =  (uFrac - 0.5) * newWidthFt;
+                            double dyFt = -(vFrac - 0.5) * newHeightFt;
+                            double wx = newCenterX + dxFt * cosR - dyFt * sinR;
+                            double wy = newCenterY + dxFt * sinR + dyFt * cosR;
+
+                            string bandStr = EsxMarkerOps.FormatBands(ap.Bands);
+                            var    color   = EsxMarkerOps.GetBandColor(ap.Bands);
+
+                            var ids = EsxMarkerOps.PlaceApMarker(
+                                doc, view, wx, wy,
+                                ap.Name, bandStr, color, markerRadius);
+                            allCreatedIds.AddRange(ids);
+                            placedCount++;
+                            foreach (var b in ap.Bands) bandsSeen.Add(b);
+
+                            stagingFloor.AccessPoints.Add(new ApStagingEntry
+                            {
+                                Id               = ap.Id,
+                                Name             = ap.Name,
+                                WorldX           = wx,
+                                WorldY           = wy,
+                                MountingHeight   = ap.MountingHeight,
+                                Vendor           = ap.Vendor,
+                                Model            = ap.Model,
+                                Bands            = new List<string>(ap.Bands),
+                                Tags             = new List<string>(ap.Tags),
+                                Mounting         = ap.Mounting,
+                                BandsSummary     = ap.BandsSummary,
+                                Technology       = ap.Technology,
+                                TxPowerSummary   = ap.TxPowerSummary,
+                                ChannelsSummary  = ap.ChannelsSummary,
+                                StreamsSummary   = ap.StreamsSummary,
+                                AntennaInfo      = ap.AntennaInfo,
+                                MarkerElementIds = ids.Select(eid => VersionCompat.GetIdValue(eid)).ToList(),
+                            });
+                        }
+                        catch { skippedCount++; }
+                    }
+                    tx3.Commit();
+                }
+
+                DiagLog($"[ESX Align] Placed {placedCount} APs (skipped {skippedCount}, aligned={aligned}).");
+                ZoomToPlacedImage(uiDoc, view, newCenterX, newCenterY, newWidthFt, newHeightFt, cosR, sinR);
+                DoEvents();
+
+                // ── Phase 7: result dialog (Done / Nudge / Redo) ──
+                bool redoRequested = false;
+                while (true)
+                {
+                    var resultDlg = new TaskDialog("ESX Align — Result")
+                    {
+                        MainInstruction = $"{placedCount} AP markers placed on '{fp.Name}'",
+                        MainContent =
+                            $"View:         {view.Name}\n" +
+                            $"Alignment:    " + (aligned
+                                ? $"4-point visual cal ({Math.Atan2(sinR, cosR) * 180 / Math.PI:F1}°)"
+                                : "Skipped — image placed at CropBox centre without rotation") + "\n" +
+                            $"Skipped APs:  {skippedCount}\n\n" +
+                            "Check the AP positions on the image.  If they look correct, click Done.",
+                    };
+                    resultDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink1,
+                        "Done — save staging and close");
+                    resultDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink2,
+                        "Nudge — shift all APs by clicking 2 points",
+                        "Click an AP marker, then click where it should actually be.");
+                    resultDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink3,
+                        "Redo — start alignment from scratch",
+                        "Deletes the current image + markers and goes back to picking 4 points.");
+                    resultDlg.DefaultButton = TaskDialogResult.CommandLink1;
+
+                    var resp = resultDlg.Show();
+
+                    if (resp == TaskDialogResult.CommandLink1)
+                    {
+                        wfDone = true;
+                        break;
+                    }
+                    if (resp == TaskDialogResult.CommandLink2)
+                    {
+                        // 2-click Nudge.
+                        XYZ curPos = null, tgtPos = null;
+                        try
+                        {
+                            curPos = uiDoc.Selection.PickPoint(
+                                "Nudge — click where an AP marker IS now");
+                            tgtPos = uiDoc.Selection.PickPoint(
+                                "Nudge — click where it SHOULD BE");
+                        }
+                        catch (Autodesk.Revit.Exceptions.OperationCanceledException)
+                        {
+                            continue;
+                        }
+                        double offX = tgtPos.X - curPos.X;
+                        double offY = tgtPos.Y - curPos.Y;
+                        DiagLog($"[ESX Align] Nudge offset: ({offX:F2}, {offY:F2}) ft");
+                        try
+                        {
+                            using var tx4 = new Transaction(doc, "ESX Align — Nudge");
+                            tx4.Start();
+                            var moveVec = new XYZ(offX, offY, 0);
+                            foreach (var apE in stagingFloor.AccessPoints)
+                            {
+                                foreach (var mid in apE.MarkerElementIds)
+                                {
+                                    try
+                                    {
+                                        var eid = VersionCompat.MakeId(mid);
+                                        var el = doc.GetElement(eid);
+                                        if (el != null && !(el is ImageInstance))
+                                            ElementTransformUtils.MoveElement(doc, eid, moveVec);
+                                    }
+                                    catch { }
+                                }
+                                apE.WorldX += offX;
+                                apE.WorldY += offY;
+                            }
+                            tx4.Commit();
+                        }
+                        catch (Exception ex)
+                        {
+                            DiagLog($"[ESX Align] Nudge failed: {ex.Message}");
+                        }
+                        ZoomToPlacedImage(uiDoc, view, newCenterX, newCenterY, newWidthFt, newHeightFt, cosR, sinR);
+                        DoEvents();
+                        continue;     // re-show result dialog
+                    }
+                    if (resp == TaskDialogResult.CommandLink3)
+                    {
+                        // Redo: clean view + restart outer loop.
+                        try
+                        {
+                            using var txR = new Transaction(doc, "ESX Align — Redo cleanup");
+                            txR.Start();
+                            foreach (var eid in allCreatedIds)
+                            {
+                                try { doc.Delete(eid); } catch { }
+                            }
+                            txR.Commit();
+                        }
+                        catch (Exception ex)
+                        {
+                            DiagLog($"[ESX Align] Redo cleanup failed: {ex.Message}");
+                        }
+                        redoRequested = true;
+                        break;
+                    }
+                    // Cancel / X → treat as Done (preserve current placement).
+                    wfDone = true;
+                    break;
+                }
+
+                TryDeleteFile(imgPath);
+
+                if (redoRequested)
+                    continue;  // back to top of outer while (next pass)
+            }
+
+            // ── Phase 6 (delayed): save staging JSON ──────────────────
+            floorResult.ApsPlaced  = stagingFloor.AccessPoints.Count;
+            floorResult.ApsSkipped = 0;
+            try
+            {
+                var staging = new ApStagingData
+                {
+                    ProjectName     = esxData.ProjectName,
+                    ProjectPathHash = RevitHelpers.GetProjectPathHash(doc),
+                    EsxFilePath     = esxPath,
+                    Timestamp       = DateTime.Now.ToString("o"),
+                    Floors          = new List<ApStagingFloor> { stagingFloor },
+                };
+                string jsonPath = RevitHelpers.GetStagingJsonPath(doc);
+                var jsonOpts = new JsonSerializerOptions { WriteIndented = true };
+                File.WriteAllText(jsonPath, JsonSerializer.Serialize(staging, jsonOpts));
+                DiagLog($"[ESX Align] Staging saved: {jsonPath}");
+            }
+            catch (Exception ex)
+            {
+                DiagLog($"[ESX Align] Staging save failed: {ex.Message}");
+            }
+
+            try
+            {
+                TaskDialog.Show("ESX Align — Complete",
+                    $"{stagingFloor.AccessPoints.Count} AP marker(s) placed on " +
+                    $"'{fp.Name}' in view '{view.Name}'.\n\n" +
+                    "Run AP Place to convert them to family instances.");
+            }
+            catch { }
+
+            return Result.Succeeded;
+        }
+
+        // Wrapper around EsxMarkerOps.CleanupMarkers + safety retry pass.
+        private static void CleanupOldEkMarkers(Document doc, View view)
+        {
+            try
+            {
+                int cleaned = EsxMarkerOps.CleanupMarkers(doc, view);
+                if (cleaned > 0)
+                    EsxMarkerOps.CleanupMarkers(doc, view);   // second pass for orphans
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[ESX Align] CleanupOldEkMarkers failed: {ex.Message}");
+            }
         }
     }
 
