@@ -5,6 +5,48 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [3.1.1] — 2026-06-05
+
+### Fixed — ESX Align: AP markers misplaced in ScopeBox-rotated views
+
+When a view's CropBox has been rotated via a ScopeBox, the Ekahau floor-plan image gets rendered **view-axis-aligned** (its edges follow the view's local X/Y, *not* world X/Y).  The 4-pick calibration math was treating both the model picks and the image picks as living in world coordinates and computing pixel offsets against `imgLeft = centerX − width/2` — a value that only makes sense when the image is world-axis-aligned.
+
+Symptoms reported by the user:
+
+- Two runs of ESX Align on the same view produced two different `CropBox` dimensions in the diag log:
+  ```
+  Run 1: CropBox 1699.3 × 669.1 ft   (horizontal — building long axis horizontal)
+  Run 2: CropBox  823.3 × 2088.7 ft  (vertical — building long axis vertical)
+  ```
+- After 4-click calibration, the image landed in roughly the right spot but **AP markers were rotated 90° relative to the image**.
+- Computed calibration rotation logged as `0.00°` even though the image was visibly rotated — because both world picks coincided at the same world location, the formula collapsed to `modelAngle == ekAngle`.
+
+**Fix** — `RunAlignWorkflow` Phase 3 + 4 (`EsxReadCommand.cs`):
+
+1. Capture `viewRot` from `view.CropBox.Transform.BasisX` once, plus its inverse for world ⇄ view-local conversion.
+2. Convert all four PickPoints from world to view-local before the pixel math.
+3. Compute `calibRot_v` (calibration rotation in view-local frame) — `0°` when picks coincide, which is now correct because the image *is* view-aligned in that frame.
+4. Compute `newCenter` in view-local feet, then transform back to world for `ImageInstance` placement.
+5. `ElementTransformUtils.RotateElement` is applied on top of the view-aligned baseline — so it gets just `calibRot_v`, not the total.  Final image orientation in world = `viewRot + calibRot_v`.
+6. Store `fp.AlignedCosR/SinR = cos/sin(viewRot + calibRot_v)` so the unchanged AP placement formula maps pixel-frame deltas correctly into world.
+7. ESC-skip path now seeds `cosR/sinR = cos/sin(viewRot)` so APs land oriented to the view even without 4-pick calibration.
+
+**Backward compatibility:** when `viewRot = 0` (no ScopeBox rotation — the most common case), the math collapses to the previous behaviour exactly.
+
+**Diag log additions** (visible in `%USERPROFILE%\Documents\EkahauRevitPlugin_diag.log`):
+
+```
+[ESX Align] View CropBox rotation = 90.00°, BasisX = (0.0000, 1.0000)
+[ESX Align] Calibration: calibRot(view-local) = 0.00°, viewRot = 90.00°,
+            totalRot(world) = 90.00°, ftPerPx_img = 0.012345
+[ESX Align] newCenter view-local = (412.5, 1044.4) ft,
+            world = (1044.4, -412.5) ft, size = (823.3 × 2088.7) ft
+```
+
+Quick mode is unaffected (it uses `revitAnchor` with full Transform basis vectors, which already handled rotated views correctly).
+
+---
+
 ## [3.1.0] — 2026-06-05
 
 ### Changed — One unified "ESX Read" button (was ESX Quick + ESX Align)

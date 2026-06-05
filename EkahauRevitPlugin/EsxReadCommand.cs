@@ -5221,18 +5221,40 @@ namespace EkahauRevitPlugin
                     EsxMarkerOps.PreScaleImageToCropBox(view, imgPxW, imgPxH);
                 DiagLog($"[ESX Align] PreScale: {preReason}");
 
+                // ── v3.1.1: capture view's CropBox.Transform (rotation) ──
+                //   ImageInstance is placed view-axis-aligned (its edges
+                //   run along the view's local X/Y, NOT world axes), so
+                //   when the view's CropBox is rotated via a ScopeBox, the
+                //   image is rotated by viewRot in world frame.  The
+                //   4-pick math + AP transform must account for this.
+                Transform viewToWorld = Transform.Identity;
+                Transform worldToView = Transform.Identity;
+                double viewRot = 0.0;
+                try
+                {
+                    viewToWorld = view.CropBox.Transform;
+                    worldToView = viewToWorld.Inverse;
+                    viewRot = Math.Atan2(viewToWorld.BasisX.Y, viewToWorld.BasisX.X);
+                }
+                catch { }
+                double viewCosR = Math.Cos(viewRot);
+                double viewSinR = Math.Sin(viewRot);
+                DiagLog($"[ESX Align] View CropBox rotation = {viewRot * 180.0 / Math.PI:F2}°, " +
+                        $"BasisX = ({viewToWorld.BasisX.X:F4}, {viewToWorld.BasisX.Y:F4})");
+
                 // Compute initial centre at the view's CropBox centre.
+                //   Both the WORLD center (for image placement) and the
+                //   VIEW-LOCAL center (for 4-pick pixel math) are needed.
                 double initCenterX, initCenterY;
+                double initCenterVx = 0, initCenterVy = 0;   // view-local
                 try
                 {
                     var cb = view.CropBox;
-                    var t  = cb.Transform;
-                    var c0 = t.OfPoint(new XYZ(cb.Min.X, cb.Min.Y, 0));
-                    var c1 = t.OfPoint(new XYZ(cb.Max.X, cb.Min.Y, 0));
-                    var c2 = t.OfPoint(new XYZ(cb.Max.X, cb.Max.Y, 0));
-                    var c3 = t.OfPoint(new XYZ(cb.Min.X, cb.Max.Y, 0));
-                    initCenterX = (c0.X + c1.X + c2.X + c3.X) / 4.0;
-                    initCenterY = (c0.Y + c1.Y + c2.Y + c3.Y) / 4.0;
+                    initCenterVx = (cb.Min.X + cb.Max.X) / 2.0;
+                    initCenterVy = (cb.Min.Y + cb.Max.Y) / 2.0;
+                    var c = viewToWorld.OfPoint(new XYZ(initCenterVx, initCenterVy, 0));
+                    initCenterX = c.X;
+                    initCenterY = c.Y;
                 }
                 catch
                 {
@@ -5304,18 +5326,40 @@ namespace EkahauRevitPlugin
 
                 if (modelPt1 != null && imagePt1 != null && modelPt2 != null && imagePt2 != null)
                 {
-                    // Convert image-world picks → bitmap pixel coords.
-                    double imgLeft = initCenterX - preW  / 2.0;
-                    double imgTop  = initCenterY + preH  / 2.0;
+                    // v3.1.1 — Bug Fix #21: do the 4-pick math in VIEW-LOCAL
+                    //   coords because the image is placed view-axis-aligned.
+                    //   In a ScopeBox-rotated view, world-frame pixel math
+                    //   would assume the image is axis-aligned with world,
+                    //   producing calibration rotation ≈ 0 (when picks coincide
+                    //   at the same world point) and AP markers that land in
+                    //   the wrong orientation.  Strategy:
+                    //     1. Convert the 4 picks world→view-local
+                    //     2. Compute pixel coords + calibration in view-local
+                    //     3. Compute newCenter in view-local, then transform
+                    //        back to world for ImageInstance placement
+                    //     4. Image rotation = calibRot_v (RotateElement is on
+                    //        top of the view-aligned baseline, which already
+                    //        accounts for viewRot)
+                    //     5. Store fp.AlignedCosR/SinR = cos/sin(viewRot +
+                    //        calibRot_v) so the AP placement formula maps
+                    //        pixel deltas → world correctly.
+                    var mP1v = worldToView.OfPoint(modelPt1);
+                    var mP2v = worldToView.OfPoint(modelPt2);
+                    var iP1v = worldToView.OfPoint(imagePt1);
+                    var iP2v = worldToView.OfPoint(imagePt2);
+
+                    // Convert image-world picks → bitmap pixel coords (in view-local).
+                    double imgLeft_v = initCenterVx - preW / 2.0;
+                    double imgTop_v  = initCenterVy + preH / 2.0;
                     double placedFtPerPx = preW / imgPxW;
-                    double ek1x_img = (imagePt1.X - imgLeft) / placedFtPerPx;
-                    double ek1y_img = (imgTop - imagePt1.Y) / placedFtPerPx;
-                    double ek2x_img = (imagePt2.X - imgLeft) / placedFtPerPx;
-                    double ek2y_img = (imgTop - imagePt2.Y) / placedFtPerPx;
+                    double ek1x_img = (iP1v.X - imgLeft_v) / placedFtPerPx;
+                    double ek1y_img = (imgTop_v - iP1v.Y) / placedFtPerPx;
+                    double ek2x_img = (iP2v.X - imgLeft_v) / placedFtPerPx;
+                    double ek2y_img = (imgTop_v - iP2v.Y) / placedFtPerPx;
 
                     double modelDist = Math.Sqrt(
-                        Math.Pow(modelPt2.X - modelPt1.X, 2) +
-                        Math.Pow(modelPt2.Y - modelPt1.Y, 2));
+                        Math.Pow(mP2v.X - mP1v.X, 2) +
+                        Math.Pow(mP2v.Y - mP1v.Y, 2));
                     double ekDist_img = Math.Sqrt(
                         Math.Pow(ek2x_img - ek1x_img, 2) +
                         Math.Pow(ek2y_img - ek1y_img, 2));
@@ -5329,23 +5373,40 @@ namespace EkahauRevitPlugin
                     else
                     {
                         double ftPerPx_img = modelDist / ekDist_img;
-                        double modelAngle  = Math.Atan2(modelPt2.Y - modelPt1.Y, modelPt2.X - modelPt1.X);
+                        double modelAngle  = Math.Atan2(mP2v.Y - mP1v.Y, mP2v.X - mP1v.X);
                         double ekAngle     = Math.Atan2(-(ek2y_img - ek1y_img), ek2x_img - ek1x_img);
-                        double rotation    = modelAngle - ekAngle;
-                        cosR = Math.Cos(rotation);
-                        sinR = Math.Sin(rotation);
+                        double calibRot    = modelAngle - ekAngle;   // calibration in VIEW-LOCAL frame
+                        double calibCos    = Math.Cos(calibRot);
+                        double calibSin    = Math.Sin(calibRot);
 
+                        // newCenter in view-local…
                         double cdx = (imgPxW / 2.0) - ek1x_img;
                         double cdy = -((imgPxH / 2.0) - ek1y_img);
-                        newCenterX = modelPt1.X + (cdx * cosR - cdy * sinR) * ftPerPx_img;
-                        newCenterY = modelPt1.Y + (cdx * sinR + cdy * cosR) * ftPerPx_img;
+                        double newCenter_vx = mP1v.X + (cdx * calibCos - cdy * calibSin) * ftPerPx_img;
+                        double newCenter_vy = mP1v.Y + (cdx * calibSin + cdy * calibCos) * ftPerPx_img;
+                        // …then back to world for ImageInstance position.
+                        var newCenterWorld = viewToWorld.OfPoint(new XYZ(newCenter_vx, newCenter_vy, 0));
+                        newCenterX  = newCenterWorld.X;
+                        newCenterY  = newCenterWorld.Y;
                         newWidthFt  = imgPxW * ftPerPx_img;
                         newHeightFt = imgPxH * ftPerPx_img;
 
-                        DiagLog($"[ESX Align] Computed: rotation = {rotation * 180.0 / Math.PI:F2}°, " +
-                                $"ftPerPx_img = {ftPerPx_img:F6}, " +
-                                $"newCenter = ({newCenterX:F2}, {newCenterY:F2}) ft, " +
-                                $"newSize = ({newWidthFt:F2}, {newHeightFt:F2}) ft");
+                        // World-frame total rotation = viewRot + calibRot.
+                        //   AP placement formula uses cosR/sinR to rotate
+                        //   pixel-frame deltas into world; that rotation
+                        //   must include the view's ScopeBox rotation.
+                        double totalRot = viewRot + calibRot;
+                        cosR = Math.Cos(totalRot);
+                        sinR = Math.Sin(totalRot);
+
+                        DiagLog($"[ESX Align] Calibration: calibRot(view-local) = " +
+                                $"{calibRot * 180.0 / Math.PI:F2}°, " +
+                                $"viewRot = {viewRot * 180.0 / Math.PI:F2}°, " +
+                                $"totalRot(world) = {totalRot * 180.0 / Math.PI:F2}°, " +
+                                $"ftPerPx_img = {ftPerPx_img:F6}");
+                        DiagLog($"[ESX Align] newCenter view-local = ({newCenter_vx:F2}, {newCenter_vy:F2}) ft, " +
+                                $"world = ({newCenterX:F2}, {newCenterY:F2}) ft, " +
+                                $"size = ({newWidthFt:F2} × {newHeightFt:F2}) ft");
 
                         // ── Re-place the image at the calibrated pose ──
                         try
@@ -5364,12 +5425,17 @@ namespace EkahauRevitPlugin
                                 try { inst2.Width = newWidthFt; } catch { }
                                 initImgId = inst2.Id;
                                 allCreatedIds.Add(initImgId);
-                                if (Math.Abs(rotation) > 1e-4)
+                                // RotateElement is applied on top of the
+                                // view-aligned baseline, so it gets just
+                                // calibRot (the rotation RELATIVE to the
+                                // view's local axes).  Final world-frame
+                                // orientation = viewRot + calibRot.
+                                if (Math.Abs(calibRot) > 1e-4)
                                 {
                                     var axis = Line.CreateBound(
                                         new XYZ(newCenterX, newCenterY, zElev),
                                         new XYZ(newCenterX, newCenterY, zElev + 1));
-                                    ElementTransformUtils.RotateElement(doc, initImgId, axis, rotation);
+                                    ElementTransformUtils.RotateElement(doc, initImgId, axis, calibRot);
                                 }
                             }
                             tx2.Commit();
@@ -5380,6 +5446,14 @@ namespace EkahauRevitPlugin
                             DiagLog($"[ESX Align] Re-place failed: {ex.Message}");
                         }
                     }
+                }
+                else
+                {
+                    // User pressed ESC: image stays at view-aligned baseline.
+                    //   AP placement still needs viewRot baked in so the
+                    //   pixel deltas land in the right world orientation.
+                    cosR = viewCosR;
+                    sinR = viewSinR;
                 }
 
                 // Store aligned image params on fp so AP placement uses
