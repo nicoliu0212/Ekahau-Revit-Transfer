@@ -177,6 +177,11 @@ namespace EkahauRevitPlugin
         public int SpatialStreamCount { get; set; }
         public string AntennaMounting { get; set; } = ""; // "CEILING", "WALL"
         public string AntennaTypeId { get; set; } = "";
+        // v3.0.1: Antenna mounting height in METRES, read from
+        // simulatedRadios.json — this is the real source of AP height
+        // (accessPoints.json.mountingHeight is almost never written by
+        // Ekahau).  All radios on the same AP share the same value.
+        public double AntennaHeight { get; set; }
     }
 
     public class EsxAntennaTypeData
@@ -534,6 +539,21 @@ namespace EkahauRevitPlugin
                     .Where(r => r.AccessPointId == ap.Id && r.Enabled)
                     .ToList();
 
+                // v3.0.1 — mounting height fallback chain
+                //   1. simulatedRadios[*].antennaHeight (the real source —
+                //      every Ekahau project writes this)
+                //   2. accessPoints[*].mountingHeight  (legacy / rare)
+                //   3. EsxAccessPointData default of 2.7 m
+                //
+                //   When step 1 hits, override step 2's value even if step 2
+                //   was present, because the radio value is what Ekahau Pro
+                //   shows in its UI and uses for propagation simulation.
+                double radioHeight = apRadios
+                    .Where(r => r.AntennaHeight > 0)
+                    .Select(r => r.AntennaHeight)
+                    .FirstOrDefault();
+                if (radioHeight > 0) ap.MountingHeight = radioHeight;
+
                 ap.Bands = apRadios
                     .Select(r => r.Band)
                     .Where(b => !string.IsNullOrEmpty(b))
@@ -587,6 +607,7 @@ namespace EkahauRevitPlugin
                                                   GetDbl(r, "antennaCount")),
                         AntennaMounting    = GetStr(r, "antennaMounting"),
                         AntennaTypeId      = GetStr(r, "antennaTypeId"),
+                        AntennaHeight      = GetDbl(r, "antennaHeight"),
                     });
                 }
             }
@@ -1894,19 +1915,46 @@ namespace EkahauRevitPlugin
 
         /// <summary>
         /// Which alignment dialogs to run.  Default is <c>LegacyAuto</c>
-        /// (everything — preserves the pre-v2.6.0 behaviour of this
-        /// command class).  The two new wrapper commands
-        /// (<see cref="EsxReadQuickCommand"/> and
-        /// <see cref="EsxReadAlignCommand"/>) construct an instance and
-        /// set this property before calling <see cref="Execute"/>.
+        /// — in v3.1.0 this is the new "unified" mode triggered by the
+        /// ribbon's single ESX Read button: an upfront
+        /// <see cref="EsxReadSetupDialog"/> auto-detects Quick vs Align
+        /// from revitAnchor / .ekahau-cal.json presence, then dispatches.
+        /// The legacy wrapper commands (<see cref="EsxReadQuickCommand"/>
+        /// / <see cref="EsxReadAlignCommand"/>) still force their explicit
+        /// mode for any external Dynamo / macro callers.
         /// </summary>
         public EsxReadMode Mode { get; set; } = EsxReadMode.LegacyAuto;
+
+        // v3.1.0 — when the unified setup dialog has already gathered
+        // (path, parsed data, single floor, single view), Execute()
+        // short-circuits the file-open / parse / floor-selector /
+        // view-match dialogs and uses these values instead.  Null on
+        // the legacy wrapper-command code paths so they keep their
+        // original multi-floor flows.
+        private string             _hintEsxPath;
+        private EsxReadResult      _hintEsxData;
+        private EsxFloorPlanData   _hintFloor;
+        private ViewPlan           _hintView;
 
         public Result Execute(ExternalCommandData commandData,
             ref string message, ElementSet elements)
         {
             UIDocument uiDoc = commandData.Application.ActiveUIDocument;
             Document   doc   = uiDoc.Document;
+
+            // v3.1.0 — unified ESX Read entry point.  The single ribbon
+            // button uses LegacyAuto, so this branch fires for nearly
+            // every interactive run.  Wrapper commands explicitly set
+            // Mode = Quick / Align and skip this — they keep the
+            // original multi-floor batch behaviour for backward compat.
+            if (Mode == EsxReadMode.LegacyAuto)
+            {
+                var unifiedResult = RunUnifiedSetupAndDispatch(uiDoc);
+                if (unifiedResult.HasValue) return unifiedResult.Value;
+                // null means "user picked Quick — continue into the Quick body
+                // below with _hint* fields already populated."
+                Mode = EsxReadMode.Quick;
+            }
 
             // v2.7.0: ESX Align uses a brand-new streamlined workflow
             // (3 dialogs + 4 PickPoints instead of 17 interactive steps).
@@ -1934,38 +1982,49 @@ namespace EkahauRevitPlugin
             }
 
             // ── 1. File open dialog ───────────────────────────────────
-            var openDlg = new Microsoft.Win32.OpenFileDialog
-            {
-                Title     = "Open Ekahau .esx Project File",
-                Filter    = "Ekahau Site Survey (*.esx)|*.esx|All files (*.*)|*.*",
-                DefaultExt = ".esx",
-            };
-            if (openDlg.ShowDialog() != true) return Result.Cancelled;
-            string esxPath = openDlg.FileName;
-
-            // ── 2. Parse ESX file ─────────────────────────────────────
+            //   v3.1.0: skip when the unified setup dialog already
+            //   captured the path + parsed data + chosen floor / view.
+            string esxPath;
             EsxReadResult esxData;
-            try
+            if (_hintEsxPath != null && _hintEsxData != null)
             {
-                var entries = EsxZipReader.ReadEntries(esxPath);
-                if (entries.Count == 0)
+                esxPath = _hintEsxPath;
+                esxData = _hintEsxData;
+            }
+            else
+            {
+                var openDlg = new Microsoft.Win32.OpenFileDialog
                 {
-                    TaskDialog.Show("ESX Read", "Failed to read .esx file — no entries found.");
+                    Title     = "Open Ekahau .esx Project File",
+                    Filter    = "Ekahau Site Survey (*.esx)|*.esx|All files (*.*)|*.*",
+                    DefaultExt = ".esx",
+                };
+                if (openDlg.ShowDialog() != true) return Result.Cancelled;
+                esxPath = openDlg.FileName;
+
+                // ── 2. Parse ESX file ─────────────────────────────────
+                try
+                {
+                    var entries = EsxZipReader.ReadEntries(esxPath);
+                    if (entries.Count == 0)
+                    {
+                        TaskDialog.Show("ESX Read", "Failed to read .esx file — no entries found.");
+                        return Result.Failed;
+                    }
+                    esxData = EsxZipReader.ParseEsx(entries);
+                }
+                catch (Exception ex)
+                {
+                    TaskDialog.Show("ESX Read — Error",
+                        $"Failed to parse .esx file:\n{ex.Message}");
                     return Result.Failed;
                 }
-                esxData = EsxZipReader.ParseEsx(entries);
-            }
-            catch (Exception ex)
-            {
-                TaskDialog.Show("ESX Read — Error",
-                    $"Failed to parse .esx file:\n{ex.Message}");
-                return Result.Failed;
-            }
 
-            if (esxData.FloorPlans.Count == 0)
-            {
-                TaskDialog.Show("ESX Read", "No floor plans found in the .esx file.");
-                return Result.Failed;
+                if (esxData.FloorPlans.Count == 0)
+                {
+                    TaskDialog.Show("ESX Read", "No floor plans found in the .esx file.");
+                    return Result.Failed;
+                }
             }
 
             // ── 2b. DWG-import fallback: if any floor plan is missing
@@ -1986,7 +2045,12 @@ namespace EkahauRevitPlugin
             DiagLog($"[ESX Read] Mode={Mode}, floors total={totalFloors}, " +
                     $"with revitAnchor={withAnchor}, without={noAnchor}");
 
-            if (Mode == EsxReadMode.Quick && withAnchor == 0)
+            // v3.1.0: the unified setup dialog has already auto-detected
+            // Quick vs Align and the user explicitly chose to proceed —
+            // these pre-flight "wrong mode?" warnings are redundant.
+            bool fromUnified = _hintFloor != null && _hintView != null;
+
+            if (!fromUnified && Mode == EsxReadMode.Quick && withAnchor == 0)
             {
                 var dlg = new TaskDialog("ESX Quick Import — No anchors")
                 {
@@ -2001,7 +2065,7 @@ namespace EkahauRevitPlugin
                 try { dlg.Show(); } catch { }
                 return Result.Cancelled;
             }
-            if (Mode == EsxReadMode.Quick && noAnchor > 0)
+            if (!fromUnified && Mode == EsxReadMode.Quick && noAnchor > 0)
             {
                 // Mixed .esx — per the v2.6.0 design, warn and let the
                 // user continue with anchored floors only.  The
@@ -2022,7 +2086,7 @@ namespace EkahauRevitPlugin
                 if (dlg.Show() != TaskDialogResult.CommandLink1)
                     return Result.Cancelled;
             }
-            if (Mode == EsxReadMode.Align && withAnchor == totalFloors && totalFloors > 0)
+            if (!fromUnified && Mode == EsxReadMode.Align && withAnchor == totalFloors && totalFloors > 0)
             {
                 var dlg = new TaskDialog("ESX Manual Align — Quick Import would work too")
                 {
@@ -2059,59 +2123,76 @@ namespace EkahauRevitPlugin
                     return Result.Cancelled;
             }
 
-            // ── 3. Floor plan selector dialog ─────────────────────────
-            var fpSelector = new EsxReadFloorSelectorDialog(
-                esxData.ProjectName,
-                esxData.FloorPlans.Select(fp => fp.Name).ToList(),
-                esxData.FloorPlans.Select(fp =>
-                    esxData.AccessPoints.Count(ap => ap.FloorPlanId == fp.Id)).ToList());
+            // ── 3-5. Floor plan + view selection ──────────────────────
+            //   v3.1.0: when the unified setup dialog already picked one
+            //   floor + view, build the single-element selection
+            //   inline instead of showing the two batch dialogs.
+            List<EsxFloorPlanData> selectedFloorPlans;
+            List<ViewPlan>          revitViews;
+            List<int>               matchedViewIndices;
 
-            if (fpSelector.ShowDialog() != true) return Result.Cancelled;
-            var selectedIndices = fpSelector.SelectedIndices;
-            if (selectedIndices.Count == 0)
+            if (fromUnified)
             {
-                TaskDialog.Show("ESX Read", "No floor plans selected.");
-                return Result.Cancelled;
+                selectedFloorPlans = new List<EsxFloorPlanData> { _hintFloor };
+                revitViews         = new List<ViewPlan>          { _hintView  };
+                matchedViewIndices = new List<int>               { 0          };
             }
-
-            // ── 4. Collect Revit floor plan views for matching ────────
-            var revitViews = new FilteredElementCollector(doc)
-                .OfClass(typeof(ViewPlan))
-                .Cast<ViewPlan>()
-                .Where(v => !v.IsTemplate && v.ViewType == ViewType.FloorPlan)
-                .OrderBy(v => v.Name)
-                .ToList();
-
-            if (revitViews.Count == 0)
+            else
             {
-                TaskDialog.Show("ESX Read",
-                    "No floor plan views found in the Revit model.");
-                return Result.Failed;
+                // ── 3. Floor plan selector dialog ──
+                var fpSelector = new EsxReadFloorSelectorDialog(
+                    esxData.ProjectName,
+                    esxData.FloorPlans.Select(fp => fp.Name).ToList(),
+                    esxData.FloorPlans.Select(fp =>
+                        esxData.AccessPoints.Count(ap => ap.FloorPlanId == fp.Id)).ToList());
+
+                if (fpSelector.ShowDialog() != true) return Result.Cancelled;
+                var selectedIndices = fpSelector.SelectedIndices;
+                if (selectedIndices.Count == 0)
+                {
+                    TaskDialog.Show("ESX Read", "No floor plans selected.");
+                    return Result.Cancelled;
+                }
+
+                // ── 4. Collect Revit floor plan views for matching ──
+                revitViews = new FilteredElementCollector(doc)
+                    .OfClass(typeof(ViewPlan))
+                    .Cast<ViewPlan>()
+                    .Where(v => !v.IsTemplate && v.ViewType == ViewType.FloorPlan)
+                    .OrderBy(v => v.Name)
+                    .ToList();
+
+                if (revitViews.Count == 0)
+                {
+                    TaskDialog.Show("ESX Read",
+                        "No floor plan views found in the Revit model.");
+                    return Result.Failed;
+                }
+
+                // ── 5. REQ 11: View matching ──
+                selectedFloorPlans = selectedIndices
+                    .Select(i => esxData.FloorPlans[i]).ToList();
+
+                // Auto-match
+                var autoMatches = new Dictionary<string, ViewPlan>(); // fpId → ViewPlan
+                foreach (var fp in selectedFloorPlans)
+                {
+                    var match = AutoMatchView(fp.Name, revitViews);
+                    if (match != null)
+                        autoMatches[fp.Id] = match;
+                }
+
+                // Show view match dialog
+                var matchDlg = new EsxReadViewMatchDialog(
+                    selectedFloorPlans.Select(fp => fp.Name).ToList(),
+                    revitViews.Select(v => v.Name).ToList(),
+                    selectedFloorPlans.Select(fp =>
+                        autoMatches.TryGetValue(fp.Id, out var m)
+                            ? revitViews.IndexOf(m) : -1).ToList());
+
+                if (matchDlg.ShowDialog() != true) return Result.Cancelled;
+                matchedViewIndices = matchDlg.MatchedViewIndices;
             }
-
-            // ── 5. REQ 11: View matching ──────────────────────────────
-            var selectedFloorPlans = selectedIndices
-                .Select(i => esxData.FloorPlans[i]).ToList();
-
-            // Auto-match
-            var autoMatches = new Dictionary<string, ViewPlan>(); // fpId → ViewPlan
-            foreach (var fp in selectedFloorPlans)
-            {
-                var match = AutoMatchView(fp.Name, revitViews);
-                if (match != null)
-                    autoMatches[fp.Id] = match;
-            }
-
-            // Show view match dialog
-            var matchDlg = new EsxReadViewMatchDialog(
-                selectedFloorPlans.Select(fp => fp.Name).ToList(),
-                revitViews.Select(v => v.Name).ToList(),
-                selectedFloorPlans.Select(fp =>
-                    autoMatches.TryGetValue(fp.Id, out var m)
-                        ? revitViews.IndexOf(m) : -1).ToList());
-
-            if (matchDlg.ShowDialog() != true) return Result.Cancelled;
-            var matchedViewIndices = matchDlg.MatchedViewIndices;
 
             // ── 6. REQ 21: Staging path ───────────────────────────────
             string stagingDir = RevitHelpers.GetStagingPath(doc);
@@ -4896,6 +4977,85 @@ namespace EkahauRevitPlugin
         }
 
         // ══════════════════════════════════════════════════════════════════
+        //  v3.1.0 — Unified setup + dispatch
+        //
+        //  Opens EsxReadSetupDialog (auto-detects Quick vs Align from
+        //  revitAnchor / .ekahau-cal.json), then routes to the appropriate
+        //  flow with the chosen floor + view pre-populated as hints.
+        //
+        //  Return semantics:
+        //    Result.Cancelled / .Failed — surface to Execute() immediately.
+        //    Result.Succeeded           — Align flow finished; surface as-is.
+        //    null                       — Quick mode chosen; Execute() should
+        //                                  fall through to the existing
+        //                                  multi-floor body with _hint*
+        //                                  fields populated (single-floor).
+        // ══════════════════════════════════════════════════════════════════
+
+        private Result? RunUnifiedSetupAndDispatch(UIDocument uiDoc)
+        {
+            Document doc = uiDoc.Document;
+
+            var revitViews = new FilteredElementCollector(doc)
+                .OfClass(typeof(ViewPlan))
+                .Cast<ViewPlan>()
+                .Where(v => !v.IsTemplate && v.ViewType == ViewType.FloorPlan)
+                .OrderBy(v => v.Name)
+                .ToList();
+
+            if (revitViews.Count == 0)
+            {
+                TaskDialog.Show("ESX Read",
+                    "No floor plan views found in the Revit model.\n\n" +
+                    "Open a project with at least one floor plan view first.");
+                return Result.Failed;
+            }
+
+            var setup = new EsxReadSetupDialog(revitViews);
+            if (setup.ShowDialog() != true)
+            {
+                DiagLog("[ESX Read] User cancelled unified setup dialog.");
+                return Result.Cancelled;
+            }
+
+            _hintEsxPath = setup.EsxFilePath;
+            _hintEsxData = setup.ParsedEsxData;
+            _hintFloor   = setup.SelectedFloor;
+            _hintView    = setup.SelectedView;
+
+            DiagLog($"[ESX Read] Unified setup: file='{_hintEsxPath}', " +
+                    $"floor='{_hintFloor.Name}', view='{_hintView.Name}', " +
+                    $"detectedMode={setup.DetectedMode}");
+
+            if (setup.DetectedMode == EsxReadMode.Align)
+            {
+                Mode = EsxReadMode.Align;
+                try
+                {
+                    return RunAlignWorkflow(uiDoc);
+                }
+                catch (Exception ex)
+                {
+                    DiagLog($"[ESX Read] RunAlignWorkflow threw: " +
+                            $"{ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
+                    try
+                    {
+                        TaskDialog.Show("ESX Read — Error",
+                            $"The Align workflow encountered an unexpected error:\n\n" +
+                            $"{ex.GetType().Name}: {ex.Message}\n\n" +
+                            "Check %USERPROFILE%\\Documents\\EkahauRevitPlugin_diag.log " +
+                            "for the full stack trace.");
+                    }
+                    catch { }
+                    return Result.Failed;
+                }
+            }
+
+            // Quick: signal "continue into the legacy Quick body".
+            return null;
+        }
+
+        // ══════════════════════════════════════════════════════════════════
         //  v2.7.0 — Streamlined ESX Align workflow
         //
         //  3 dialogs + 4 PickPoints (down from 17 interactive steps):
@@ -4913,6 +5073,9 @@ namespace EkahauRevitPlugin
             DiagLog($"\n========== ESX Align — v{VersionInfo.Version} session ==========");
 
             // ── Phase 1: Setup dialog ─────────────────────────────────
+            //   v3.1.0: when invoked via the unified ESX Read button,
+            //   the EsxReadSetupDialog has already captured these — skip
+            //   the legacy EsxAlignSetupDialog and use hints directly.
             var revitViews = new FilteredElementCollector(doc)
                 .OfClass(typeof(ViewPlan))
                 .Cast<ViewPlan>()
@@ -4928,19 +5091,38 @@ namespace EkahauRevitPlugin
                 return Result.Failed;
             }
 
-            var setup = new EsxAlignSetupDialog(revitViews);
-            if (setup.ShowDialog() != true)
+            string             esxPath;
+            EsxReadResult      esxData;
+            EsxFloorPlanData   fp;
+            ViewPlan           view;
+
+            if (_hintEsxPath != null && _hintEsxData != null &&
+                _hintFloor   != null && _hintView    != null)
             {
-                DiagLog("[ESX Align] User cancelled setup dialog.");
-                return Result.Cancelled;
+                // v3.1.0 — unified setup dialog already collected these.
+                esxPath = _hintEsxPath;
+                esxData = _hintEsxData;
+                fp      = _hintFloor;
+                view    = _hintView;
+                DiagLog($"[ESX Align] Using unified-setup hints: file='{esxPath}', " +
+                        $"floor='{fp.Name}', view='{view.Name}'");
             }
+            else
+            {
+                var setup = new EsxAlignSetupDialog(revitViews);
+                if (setup.ShowDialog() != true)
+                {
+                    DiagLog("[ESX Align] User cancelled setup dialog.");
+                    return Result.Cancelled;
+                }
 
-            string esxPath = setup.EsxFilePath;
-            var    esxData = setup.ParsedEsxData;
-            var    fp      = setup.SelectedFloor;
-            var    view    = setup.SelectedView;
+                esxPath = setup.EsxFilePath;
+                esxData = setup.ParsedEsxData;
+                fp      = setup.SelectedFloor;
+                view    = setup.SelectedView;
 
-            DiagLog($"[ESX Align] Setup: file='{esxPath}', floor='{fp.Name}', view='{view.Name}'");
+                DiagLog($"[ESX Align] Setup: file='{esxPath}', floor='{fp.Name}', view='{view.Name}'");
+            }
 
             // Apply DWG-import fallback (sets anchor on fp if a sidecar exists).
             TryApplyDwgCalibrationFallback(esxData, esxPath);

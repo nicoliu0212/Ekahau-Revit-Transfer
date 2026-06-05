@@ -55,53 +55,34 @@ namespace EkahauRevitPlugin
             ApplyIcons(dwgExportBtn, "DwgExport_32.png", "DwgExport_16.png");
             panelExport.AddItem(dwgExportBtn);
 
-            // v2.6.0: ESX Read split into two focused workflows.
-            // v2.6.3: legacy "ESX Read" button removed — three buttons
-            // for the same task was confusing.  The two new buttons
-            // cover every use case:
-            //   "ESX Quick" — round-trip imports (.esx came from ESX
-            //      Export, every floor has revitAnchor).  3–4 step flow.
-            //   "ESX Align" — external Ekahau projects (no anchor, need
-            //      2-point visual cal + design-area bitmap crop).
-            //
-            // The underlying EsxReadCommand class is kept (it's the
-            // engine both wrapper commands delegate to); only the
-            // ribbon entry is gone.  Any user macro / Dynamo script
-            // that invokes EsxReadCommand by class name still works.
-            var esxQuickBtn = new PushButtonData(
-                "ESXQuick",
-                "ESX\nQuick",
+            // v2.6.0: ESX Read split into ESX Quick + ESX Align.
+            // v2.6.3: legacy "ESX Read" button removed.
+            // v3.1.0: re-unified back to a single "ESX Read" button —
+            //   the new EsxReadSetupDialog auto-detects Quick vs Align
+            //   from revitAnchor / .ekahau-cal.json presence, so the
+            //   user no longer has to choose a mode upfront.  The old
+            //   wrapper commands (EsxReadQuickCommand / EsxReadAlignCommand)
+            //   are KEPT in the assembly so any external Dynamo / macro
+            //   scripts that invoke them by class name still work.
+            var esxReadBtn = new PushButtonData(
+                "ESXRead",
+                "ESX\nRead",
                 assemblyPath,
-                "EkahauRevitPlugin.EsxReadQuickCommand")
+                "EkahauRevitPlugin.EsxReadCommand")
             {
-                ToolTip = "Quick import for round-trip .esx files (came from ESX Export).\n" +
-                          "Requires revitAnchor on every floor; skips manual alignment,\n" +
-                          "rotation picker, and Nudge dialog.  Use ESX Align instead for\n" +
-                          ".esx files that were built from PDF / image in Ekahau Pro.",
+                ToolTip = "Import AP positions from Ekahau .esx files.\n\n" +
+                          "Auto-detects the right mode:\n" +
+                          "  ⚡ Quick — when the .esx contains a revitAnchor " +
+                          "(from ESX Export) or when a matching .ekahau-cal.json " +
+                          "sidecar (from DWG Export) is found next to it.\n" +
+                          "  🎯 Align — for external .esx files with no calibration; " +
+                          "runs a 4-click visual alignment.",
                 LongDescription =
-                    "Fast 3–4-step flow: select .esx → pick floors → review APs → done.\n" +
-                    "If the file has no revitAnchor, a warning offers to switch to ESX Align.",
+                    "Single unified flow: select .esx → pick floor + view → start. " +
+                    "Mode is shown in the setup dialog before you click Start.",
             };
-            ApplyIcons(esxQuickBtn, "ESXRead_32.png", "ESXRead_16.png");
-            panelExport.AddItem(esxQuickBtn);
-
-            var esxAlignBtn = new PushButtonData(
-                "ESXAlign",
-                "ESX\nAlign",
-                assemblyPath,
-                "EkahauRevitPlugin.EsxReadAlignCommand")
-            {
-                ToolTip = "Manual-alignment import for external Ekahau projects.\n" +
-                          "Crops the bitmap to the design area, runs 2-point visual cal,\n" +
-                          "and places APs using the calibrated image's parameters\n" +
-                          "directly.  Use ESX Quick instead when the .esx came from\n" +
-                          "ESX Export.",
-                LongDescription =
-                    "Full interactive flow.  If every floor already has revitAnchor, " +
-                    "a warning suggests switching to ESX Quick (much faster).",
-            };
-            ApplyIcons(esxAlignBtn, "ESXRead_32.png", "ESXRead_16.png");
-            panelExport.AddItem(esxAlignBtn);
+            ApplyIcons(esxReadBtn, "ESXRead_32.png", "ESXRead_16.png");
+            panelExport.AddItem(esxReadBtn);
 
             // ── Panel 2: Access Point ───────────────────────────────
             var panelAp = application.CreateRibbonPanel(tabName, "Access Point");

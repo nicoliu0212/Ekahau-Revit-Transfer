@@ -5,6 +5,56 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [3.1.0] — 2026-06-05
+
+### Changed — One unified "ESX Read" button (was ESX Quick + ESX Align)
+
+The two separate ribbon buttons are merged into a single **ESX Read** entry whose mode is auto-detected from the picked `.esx`:
+
+| Detected source | Mode |
+|---|---|
+| `revitAnchor` inside the `.esx` (from ESX Export round-trip) | ⚡ Quick |
+| `.ekahau-cal.json` sidecar next to the `.esx` (from DWG Export) | ⚡ Quick (via DWG calibration) |
+| Neither | 🎯 Align (4-click visual alignment) |
+
+**New `EsxReadSetupDialog`** (700×600, resizable) collects everything in one shot:
+
+- File picker for the `.esx`
+- Project info banner showing project name, AP count + vendor/model, and the detected mode badge (with the *reason* — sidecar filename or "revitAnchor found")
+- Floor-plan ListBox (with per-floor AP counts) on the left
+- Revit-view ListBox on the right, auto-matched by name when a floor is selected
+- Cancel / **Start Read** at the bottom (Start enabled only once all three selections are valid)
+
+After Start, the same downstream Quick or Align flow runs as before — but the now-redundant intermediate dialogs (pre-flight "wrong mode?" warnings, batch floor-selector, batch view-match) are short-circuited because the unified dialog already gathered single-floor + single-view.
+
+**Backward compatibility.** The legacy wrapper classes (`EsxReadQuickCommand`, `EsxReadAlignCommand`) remain in the assembly with their original explicit-mode behaviour, so any Dynamo / macro script that invokes them by class name keeps working unchanged.  Only the ribbon entry changed.
+
+### Fixed — AP mounting height was always the 2.7 m default
+
+`EsxAccessPointData.MountingHeight` was read from `accessPoints.json`'s `mountingHeight` field — but Ekahau practically never writes that field, so every imported AP defaulted to 2.7 m regardless of what the project actually set.
+
+The real source is `simulatedRadios.json`'s `antennaHeight` (in metres).  Each AP has multiple radio entries (one per band) but they all share the same antenna height.
+
+**Fix** — three small surgeries in `EsxReadCommand.cs`:
+
+1. Add `AntennaHeight` to `EsxRadioData`.
+2. Parse `antennaHeight` in `ParseRadios` (same line as the existing `antennaMounting`).
+3. In the per-AP loop after `ParseRadios`, override `ap.MountingHeight` with the first radio's `AntennaHeight` when `> 0`.  Fallback chain:
+   - `simulatedRadios[*].antennaHeight` (the real value, almost always present)
+   - `accessPoints[*].mountingHeight` (legacy / rare)
+   - 2.7 m default
+
+Both `ApStagingEntry` construction sites already copy `ap.MountingHeight` / `ap.Mounting`, and `ApPlaceCommand.Execute` already does `zOffset = ap.MountingHeight / FeetToMetres` + writes `Ekahau_MountHeight_m` parameter — so the rest of the chain inherits the fix automatically.  Both Quick and Align modes benefit.
+
+### Files
+- `EkahauRevitPlugin/EsxReadSetupDialog.cs` (new) — unified WPF setup window with mode auto-detection.
+- `EkahauRevitPlugin/EsxReadCommand.cs` — new `RunUnifiedSetupAndDispatch`, `_hint*` short-circuit fields, sidecar-aware mode detection.  `RunAlignWorkflow` accepts pre-populated hints.
+- `EkahauRevitPlugin/App.cs` — ribbon: ESX Quick + ESX Align → single ESX Read button.
+- `EkahauRevitPlugin/VersionInfo.cs` → 3.1.0.
+- `Installer/Package.wxs` → 3.1.0.0.
+
+---
+
 ## [3.0.0] — 2026-06-05
 
 ### Changed — ESX Export: model-accurate geometry (BREAKING)
