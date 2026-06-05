@@ -5003,28 +5003,16 @@ namespace EkahauRevitPlugin
                 imgBytes = ImageNormalizer.NormalizeForRevit(imgBytes, out string normDetail);
                 DiagLog($"[ESX Align] WIC re-encode: {normDetail}");
 
-                // Crop to design area (uses fp.CropMin/Max from floorPlans.json).
-                var croppedBytes = ImageNormalizer.CropToDesignArea(
-                    imgBytes, fp.Width, fp.Height,
-                    fp.CropMinX, fp.CropMinY, fp.CropMaxX, fp.CropMaxY,
-                    out var cropInfo);
-                DiagLog($"[ESX Align] Design-area crop: {cropInfo.Reason}");
-                if (cropInfo.WasCropped && croppedBytes != null && croppedBytes.Length > 100)
-                {
-                    imgBytes = croppedBytes;
-                    fp.CropApplied       = true;
-                    fp.CropAppliedMinFpX = cropInfo.FpCropMinX;
-                    fp.CropAppliedMinFpY = cropInfo.FpCropMinY;
-                    fp.CropAppliedMaxFpX = cropInfo.FpCropMaxX;
-                    fp.CropAppliedMaxFpY = cropInfo.FpCropMaxY;
-                }
-                else
-                {
-                    fp.CropAppliedMinFpX = 0;
-                    fp.CropAppliedMinFpY = 0;
-                    fp.CropAppliedMaxFpX = fp.Width;
-                    fp.CropAppliedMaxFpY = fp.Height;
-                }
+                // v2.7.2: no design-area crop.  Place the FULL bitmap and
+                // map AP fp coords to (apX / fp.Width, apY / fp.Height) of
+                // the placed image — matches the user-spec direct-image-
+                // params transform.  CropApplied stays false; the AP
+                // formula below uses fp.Width/fp.Height directly.
+                fp.CropApplied        = false;
+                fp.CropAppliedMinFpX  = 0;
+                fp.CropAppliedMinFpY  = 0;
+                fp.CropAppliedMaxFpX  = fp.Width;
+                fp.CropAppliedMaxFpY  = fp.Height;
 
                 string ext = ImageNormalizer.DetectExtension(imgBytes);
                 string imgPath = Path.Combine(Path.GetTempPath(),
@@ -5226,22 +5214,65 @@ namespace EkahauRevitPlugin
                 DoEvents();
 
                 // ── Phase 5: place AP markers ─────────────────────────
+                //   v2.7.2: rotation picker re-introduced as a cycle button
+                //   in the result dialog (UP → RIGHT → DOWN → LEFT → UP).
+                //   AP placement is extracted into a local function so the
+                //   rotation cycle can re-call it without re-doing the
+                //   image placement.  AP coords are first inverse-rotated
+                //   via EsxCoordXform.RotateApFromDisplayToImageSpace, then
+                //   fed through the direct image-params transform.
                 var floorAps = esxData.AccessPoints
                     .Where(ap => ap.FloorPlanId == fp.Id && ap.Include)
                     .ToList();
+                var rotationOptions = new[] { "UP", "RIGHT", "DOWN", "LEFT" };
+                int rotationIndex = 0;
                 int placedCount = 0;
                 int skippedCount = 0;
-                var bandsSeen = new HashSet<string>();
 
-                double xUMin = fp.CropApplied ? fp.CropAppliedMinFpX : 0;
-                double xUMax = fp.CropApplied ? fp.CropAppliedMaxFpX : fp.Width;
-                double xVMin = fp.CropApplied ? fp.CropAppliedMinFpY : 0;
-                double xVMax = fp.CropApplied ? fp.CropAppliedMaxFpY : fp.Height;
-                double xURange = xUMax - xUMin;
-                double xVRange = xVMax - xVMin;
-
-                if (floorAps.Count > 0)
+                // Local function: deletes any existing AP markers + re-
+                // places all APs with the rotation at `rotationOptions[idx]`.
+                void PlaceApsWithRotation(int idx)
                 {
+                    string rotDir = rotationOptions[idx];
+
+                    // Delete current AP markers (do NOT touch the image).
+                    if (stagingFloor.AccessPoints.Count > 0)
+                    {
+                        try
+                        {
+                            using var txDel = new Transaction(doc, "ESX Align — Clear old APs");
+                            txDel.Start();
+                            foreach (var apE in stagingFloor.AccessPoints)
+                            {
+                                foreach (var mid in apE.MarkerElementIds)
+                                {
+                                    try
+                                    {
+                                        var eid = VersionCompat.MakeId(mid);
+                                        if (doc.GetElement(eid) != null)
+                                        {
+                                            doc.Delete(eid);
+                                            // Also remove from allCreatedIds so Redo doesn't
+                                            // try to delete a now-invalid id.
+                                            allCreatedIds.RemoveAll(e => VersionCompat.GetIdValue(e) == mid);
+                                        }
+                                    }
+                                    catch { }
+                                }
+                            }
+                            txDel.Commit();
+                        }
+                        catch (Exception delEx)
+                        {
+                            DiagLog($"[ESX Align] Clear-old-APs failed: {delEx.Message}");
+                        }
+                    }
+                    stagingFloor.AccessPoints.Clear();
+
+                    placedCount = 0;
+                    skippedCount = 0;
+                    if (floorAps.Count == 0) return;
+
                     double markerRadius = EsxMarkerOps.GetAdaptiveRadius(view);
                     using var tx3 = new Transaction(doc, "ESX Align — Place AP Markers");
                     tx3.Start();
@@ -5249,10 +5280,17 @@ namespace EkahauRevitPlugin
                     {
                         try
                         {
-                            // Direct image-params transform (no
-                            // BuildEkahauToRevitXform indirection).
-                            double uFrac = (ap.PixelX - xUMin) / xURange;
-                            double vFrac = (ap.PixelY - xVMin) / xVRange;
+                            // 1. Inverse-rotate AP coords from Ekahau display
+                            //    space to image space (no-op for "UP").
+                            var (apImgX, apImgY) = EsxCoordXform
+                                .RotateApFromDisplayToImageSpace(
+                                    ap.PixelX, ap.PixelY, fp.Width, fp.Height, rotDir);
+
+                            // 2. Direct image-params transform.  AP fp coord
+                            //    → fraction of full fp space → ft offset
+                            //    from image centre → world (rotated).
+                            double uFrac = apImgX / fp.Width;
+                            double vFrac = apImgY / fp.Height;
                             double dxFt =  (uFrac - 0.5) * newWidthFt;
                             double dyFt = -(vFrac - 0.5) * newHeightFt;
                             double wx = newCenterX + dxFt * cosR - dyFt * sinR;
@@ -5266,7 +5304,6 @@ namespace EkahauRevitPlugin
                                 ap.Name, bandStr, color, markerRadius);
                             allCreatedIds.AddRange(ids);
                             placedCount++;
-                            foreach (var b in ap.Bands) bandsSeen.Add(b);
 
                             stagingFloor.AccessPoints.Add(new ApStagingEntry
                             {
@@ -5292,16 +5329,21 @@ namespace EkahauRevitPlugin
                         catch { skippedCount++; }
                     }
                     tx3.Commit();
+
+                    DiagLog($"[ESX Align] Placed {placedCount} APs (skipped {skippedCount}, rotation='{rotDir}').");
                 }
 
-                DiagLog($"[ESX Align] Placed {placedCount} APs (skipped {skippedCount}, aligned={aligned}).");
+                // Initial AP placement at rotation = UP.
+                PlaceApsWithRotation(rotationIndex);
                 ZoomToPlacedImage(uiDoc, view, newCenterX, newCenterY, newWidthFt, newHeightFt, cosR, sinR);
                 DoEvents();
 
-                // ── Phase 7: result dialog (Done / Nudge / Redo) ──
+                // ── Phase 7: result dialog (Done / Nudge / Rotate 90° / Redo) ──
                 bool redoRequested = false;
                 while (true)
                 {
+                    string currentRot = rotationOptions[rotationIndex];
+                    string nextRot    = rotationOptions[(rotationIndex + 1) % 4];
                     var resultDlg = new TaskDialog("ESX Align — Result")
                     {
                         MainInstruction = $"{placedCount} AP markers placed on '{fp.Name}'",
@@ -5310,6 +5352,7 @@ namespace EkahauRevitPlugin
                             $"Alignment:    " + (aligned
                                 ? $"4-point visual cal ({Math.Atan2(sinR, cosR) * 180 / Math.PI:F1}°)"
                                 : "Skipped — image placed at CropBox centre without rotation") + "\n" +
+                            $"AP rotation:  {currentRot}\n" +
                             $"Skipped APs:  {skippedCount}\n\n" +
                             "Check the AP positions on the image.  If they look correct, click Done.",
                     };
@@ -5319,6 +5362,10 @@ namespace EkahauRevitPlugin
                         "Nudge — shift all APs by clicking 2 points",
                         "Click an AP marker, then click where it should actually be.");
                     resultDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink3,
+                        $"Rotate APs 90° — try if APs are rotated relative to the image",
+                        $"Currently {currentRot} → cycles to {nextRot} (then DOWN, LEFT, back to UP).  " +
+                        "Use when ScopeBox rotation makes the .esx AP coords land in the wrong orientation.");
+                    resultDlg.AddCommandLink(TaskDialogCommandLinkId.CommandLink4,
                         "Redo — start alignment from scratch",
                         "Deletes the current image + markers and goes back to picking 4 points.");
                     resultDlg.DefaultButton = TaskDialogResult.CommandLink1;
@@ -5380,6 +5427,28 @@ namespace EkahauRevitPlugin
                         continue;     // re-show result dialog
                     }
                     if (resp == TaskDialogResult.CommandLink3)
+                    {
+                        // v2.7.2: Rotate APs 90° (cycle UP → RIGHT → DOWN
+                        // → LEFT → UP).  Delete current AP markers (image
+                        // stays put) and re-place with the new rotation.
+                        // Image is unchanged — only AP coords are inverse-
+                        // rotated via RotateApFromDisplayToImageSpace
+                        // before the direct image-params transform.
+                        rotationIndex = (rotationIndex + 1) % 4;
+                        DiagLog($"[ESX Align] User cycled AP rotation to '{rotationOptions[rotationIndex]}'.");
+                        try
+                        {
+                            PlaceApsWithRotation(rotationIndex);
+                        }
+                        catch (Exception rotEx)
+                        {
+                            DiagLog($"[ESX Align] Re-place after rotation failed: {rotEx.Message}");
+                        }
+                        ZoomToPlacedImage(uiDoc, view, newCenterX, newCenterY, newWidthFt, newHeightFt, cosR, sinR);
+                        DoEvents();
+                        continue;     // re-show result dialog with updated rotation label
+                    }
+                    if (resp == TaskDialogResult.CommandLink4)
                     {
                         // Redo: clean view + restart outer loop.
                         try

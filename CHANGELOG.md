@@ -5,6 +5,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [2.7.2] — 2026-06-04
+
+### Changed — ESX Align: direct AP transform + rotation cycle button
+
+Two changes per the user-spec:
+
+**1. AP transform now uses fp.Width/fp.Height directly (no design-area crop).**
+
+The v2.6.3-introduced `CropToDesignArea` bitmap crop is no longer applied in the Align flow.  The full bitmap (Sheet + title block + design area) is placed in Revit, sized via `PreScaleImageToCropBox`.  AP fp coords map to fractions of `fp.Width × fp.Height` of the placed image:
+
+```csharp
+uFrac = ap.PixelX / fp.Width
+vFrac = ap.PixelY / fp.Height
+dxFt  =  (uFrac - 0.5) * newWidthFt
+dyFt  = -(vFrac - 0.5) * newHeightFt    // Y-flip
+wx    = newCenterX + dxFt*cosR - dyFt*sinR
+wy    = newCenterY + dxFt*sinR + dyFt*cosR
+```
+
+Simpler mental model: bitmap represents the full floor plan; AP at `(0.5, 0.5)` lands at the image centre; `(1, 1)` at the bottom-right corner.  No crop bounds to reason about.
+
+Quick / Legacy modes continue using `BuildEkahauToRevitXform` as before.
+
+**2. Rotation picker re-introduced as a "Rotate APs 90°" button in the Result dialog.**
+
+The Result dialog now has 4 commands instead of 3:
+- **Done** — save staging, close
+- **Nudge** — 2-click translation correction
+- **Rotate APs 90°** ← **NEW** — cycles UP → RIGHT → DOWN → LEFT → UP.  Deletes the existing AP markers (image stays put) and re-places them with the new `rotateUpDirection` applied via `EsxCoordXform.RotateApFromDisplayToImageSpace` before the direct image-params transform.  Use when ScopeBox rotation causes the .esx AP coords to land in the wrong orientation.
+- **Redo** — full restart (delete everything, back to image placement + 4-pick)
+
+The Result dialog now shows `AP rotation: UP` (or RIGHT/DOWN/LEFT) in its body so the user can see the current state.
+
+### Implementation
+- AP placement logic in `RunAlignWorkflow` extracted into a local function `PlaceApsWithRotation(int idx)` so the rotation cycle button can re-call it without re-doing image placement.
+- The local function deletes the current AP markers (only — image is untouched), inverse-rotates each AP coord, applies the direct image-params transform, and re-populates `stagingFloor.AccessPoints` so the staging JSON reflects the latest rotation.
+- `EsxCoordXform.RotateApFromDisplayToImageSpace` (added in v2.5.23) is reused — no new rotation helper needed.
+
 ## [2.7.1] — 2026-06-04
 
 ### Fixed — CI build broken in v2.7.0 (no MSI shipped)
