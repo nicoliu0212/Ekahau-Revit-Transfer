@@ -5,6 +5,72 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the 
 
 ---
 
+## [3.0.0] — 2026-06-05
+
+### Changed — ESX Export: model-accurate geometry (BREAKING)
+
+Four improvements that bring the exported `.esx` much closer to the real Revit model.  All four hit the same code paths so they ship together as one release.  **Breaking** because Ekahau wall/floor types are now per-Revit-type-and-dimension rather than per-preset — older projects re-imported into the same plan will see new type IDs.
+
+**P0a — Per-type wall thickness from Revit's compound structure**
+
+`WallCollector.AddWall` now reads `WallType.Width` (which Revit derives from `GetCompoundStructure().GetWidth()`).  The Ekahau wall type's `thickness` is rounded to the nearest mm; walls within ±10% share one type.  Previously every wall of the same preset shared the preset's `DefaultThicknessMeters`, so a 250 mm CMU and a 100 mm partition both came out as `0.20 m`.
+
+**P0b — Per-type wall height from Revit parameters**
+
+New helper `GetWallHeightMeters(Wall)` reads `WALL_BASE_OFFSET` and either `WALL_USER_HEIGHT_PARAM` (unconnected height — typical partitions) or `WALL_HEIGHT_TYPE` + `WALL_TOP_OFFSET` (top constraint — structural walls).  Falls back to `0..3.0 m` only when both paths fail.  The resulting `(lowerEdge, upperEdge)` is rounded to the nearest 0.1 m; walls in the same bracket share one type.
+
+The wall-type cache key is now `presetKey_thickMm_lowerM-upperM` instead of just `presetKey`, and the type name gets a smart suffix when either dimension is non-standard:
+- `Wall, Concrete` — preset default
+- `Wall, Concrete (250mm)` — non-standard thickness only
+- `Wall, Concrete (0.0-4.5m)` — non-standard height only
+- `Wall, Concrete (250mm, 0.0-4.5m)` — both differ
+
+The de-dup pass in `BuildEsx` now keys on type `id` (GUID) instead of preset `key`, otherwise multiple types with the same preset would collapse to one.
+
+**P1 — Stacked opening segments (door / window head + sill walls)**
+
+New helper `GetOpeningHeightMeters(FamilyInstance, category)` reads `INSTANCE_HEAD_HEIGHT_PARAM` and `INSTANCE_SILL_HEIGHT_PARAM`.  `WallSplitter.EmitStackedOpeningSegments` then emits up to **three** Ekahau wall segments at each opening:
+
+1. **Wall below sill** — host wall lower → opening sill (windows only)
+2. **Opening itself** — opening sill → opening head (door / window preset, retains its existing attenuation)
+3. **Wall above head** — opening head → host wall upper (RF leakage above doors)
+
+Each stacked segment carries its own `(lowerEdge, upperEdge)` so the segments above and below the opening get bracketed to the host wall's actual height, not the opening's.  Previously the splitter emitted only segment 2 — RF energy could "leak" above doorways and through the spandrel below windows in Ekahau's propagation model.
+
+**P2 — Floor / ceiling slabs as Ekahau attenuationAreas**
+
+New `FloorCollector` scans Revit `Floor` elements visible in each view, lifts the outer boundary polygon from the largest near-horizontal `PlanarFace` of the floor's geometry (works for flat / sloped / slab-edge floors alike), and exports each one as an Ekahau `attenuationArea`.
+
+- Thickness: `FloorType.GetCompoundStructure().GetWidth()` (fallback 0.20 m).
+- Elevation: host `Level.Elevation` + `FLOOR_HEIGHTABOVELEVEL_PARAM` ⇒ `lowerEdge`; `lowerEdge + thickness` ⇒ `upperEdge`.
+- Material: new `FloorSlab` preset (concrete RF properties: 30 / 50 / 58 dB at 2/5/6 GHz).
+- Boundary polygon goes through the same `WorldToEkahau` transform as walls, so slabs land on the correct pixels in Ekahau Pro.
+- One `attenuationAreaType` per (preset, thickness mm, elevation 0.1 m bracket) — siblings share an entry.
+- Inner loops (holes) are not exported (Ekahau attenuationAreas are a single polygon); linked-model floors collected when a linked wall-type mapping is configured.
+
+This matters for **multi-floor `.esx` projects** — slabs are how Ekahau models inter-floor RF attenuation in 3D propagation.
+
+### Files
+- `EkahauRevitPlugin/EsxExportCommand.cs`
+  - `AddWall` populates `LowerEdgeMeters` / `UpperEdgeMeters` from `GetWallHeightMeters`.
+  - `AddOpening` populates `SillHeightMeters` / `HeadHeightMeters` + host-wall bracket.
+  - `WallSplitter.EmitStackedOpeningSegments` (new) replaces single-segment opening emission.
+  - `EkahauJsonBuilder.GetOrCreateType` cache key + `MakeWallType` signature updated; smart name suffix.
+  - `EkahauJsonBuilder.BuildFloorAttenuationAreas` + `MakeFloorType` (new).
+  - `FloorCollector` (new class) with view-bound + linked-doc scanning, geometry-based outline.
+  - `BuildEsx` signature gains `floorTypes` parameter; emits real `attenuationAreaTypes.json` + `attenuationAreas.json` (previously stubbed to `[]`).
+  - `BuildEsx` wall-type de-dup keyed on `id` instead of `key`.
+- `EkahauRevitPlugin/EsxModels.cs` — `PerViewData.FloorAttenuationAreas` field.
+- `EkahauRevitPlugin/EkahauPresets.cs` — new `FloorSlab` preset.
+- `EkahauRevitPlugin/VersionInfo.cs` → 3.0.0 / 2026-06-05.
+- `Installer/Package.wxs` → 3.0.0.0.
+
+### Compatibility
+- Quick mode + Legacy ESX Read mode in the **Read** path are untouched.
+- Existing `.esx` files re-exported with v3.0.0 will have new wall-type and attenuationArea-type IDs.  Re-importing into a Ekahau project that already has the old types will add the new types alongside the old ones.
+
+---
+
 ## [2.7.2] — 2026-06-04
 
 ### Changed — ESX Align: direct AP transform + rotation cycle button

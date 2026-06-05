@@ -7,8 +7,8 @@ namespace EkahauRevitPlugin
     /// </summary>
     public static class VersionInfo
     {
-        public const string Version     = "2.7.2";
-        public const string ReleaseDate = "2026-06-04";
+        public const string Version     = "3.0.0";
+        public const string ReleaseDate = "2026-06-05";
         public const string RepoUrl     = "https://github.com/nicoliu0212/Ekahau-Revit-Transfer";
         public const string LicenseUrl  = "https://github.com/nicoliu0212/Ekahau-Revit-Transfer/blob/main/LICENSE";
         public const string IssuesUrl   = "https://github.com/nicoliu0212/Ekahau-Revit-Transfer/issues";

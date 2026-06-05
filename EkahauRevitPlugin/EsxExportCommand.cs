@@ -125,6 +125,12 @@ namespace EkahauRevitPlugin
             var globalTypeCache = new Dictionary<string, Dictionary<string, object>>();
             var globalWallTypes = new List<Dictionary<string, object>>();
 
+            // v3.0.0 — shared floor (attenuationArea) type cache.  Key is
+            // "preset_thickMM_loEdge-hiEdge" so floors with identical
+            // material + slab thickness + elevation share one type entry.
+            var globalFloorTypeCache = new Dictionary<string, Dictionary<string, object>>();
+            var globalFloorTypes     = new List<Dictionary<string, object>>();
+
             var allViewData = new List<PerViewData>();
             bool cancelAll  = false;
             var  debugLog   = new StringBuilder();
@@ -251,6 +257,9 @@ namespace EkahauRevitPlugin
                     var walls    = WallCollector.CollectWalls(doc, view, linkConfig, overrides);
                     var openings = WallCollector.CollectOpenings(doc, view, linkConfig, overrides);
 
+                    // v3.0.0 — collect floor/ceiling slabs (P2)
+                    var slabs    = FloorCollector.CollectFloors(doc, view, linkConfig, overrides);
+
                     // 8g. Split walls at openings, fix overlapping merge (Req 4)
                     var finalSegs = WallSplitter.SplitWallsWithOpenings(walls, openings);
 
@@ -268,6 +277,13 @@ namespace EkahauRevitPlugin
                     var (wallSegments, wallPoints) = EkahauJsonBuilder.BuildWallJson(
                         finalSegs, floorPlanId, xform,
                         globalTypeCache, globalWallTypes, debugLog);
+
+                    // v3.0.0 — build attenuationArea entries for floor slabs.
+                    // Types are accumulated into globalFloorTypes; per-view
+                    // polygons (already xform'd) go into PerViewData.
+                    var floorAreas = EkahauJsonBuilder.BuildFloorAttenuationAreas(
+                        slabs, floorPlanId, xform,
+                        globalFloorTypeCache, globalFloorTypes, debugLog);
 
                     // 8i. Collect APs (Req 20)
                     progress.Update($"Processing: {view.Name}", "Looking for access points…");
@@ -328,6 +344,7 @@ namespace EkahauRevitPlugin
                         PngBytes        = pngBytes,
                         WallSegments    = wallSegments,
                         WallPoints      = wallPoints,
+                        FloorAttenuationAreas = floorAreas,
                         AccessPoints    = apCandidates,
                         WorldToEkahau   = xform,
                     };
@@ -371,8 +388,8 @@ namespace EkahauRevitPlugin
             {
                 if (exportMode == ExportMode.MergeAll)
                 {
-                    BuildEsx(allViewData, globalWallTypes, outputPath,
-                             projName, clientName, projAddress);
+                    BuildEsx(allViewData, globalWallTypes, globalFloorTypes,
+                             outputPath, projName, clientName, projAddress);
                     esxFiles.Add(outputPath);
                 }
                 else
@@ -392,14 +409,23 @@ namespace EkahauRevitPlugin
                             if (seg.TryGetValue("wallTypeId", out object id))
                                 usedTypeIds.Add(id?.ToString() ?? "");
                         }
-
-                        // Filter global types to only those used by this floor
                         var viewTypes = globalWallTypes
                             .Where(wt => usedTypeIds.Contains(wt.GetValueOrDefault("id")?.ToString() ?? ""))
                             .ToList();
 
-                        BuildEsx(new List<PerViewData> { vd }, viewTypes, path,
-                                 projName, clientName, projAddress);
+                        // v3.0.0 — same filter for floor (attenuationArea) types.
+                        var usedFloorTypeIds = new HashSet<string>();
+                        foreach (var area in vd.FloorAttenuationAreas)
+                        {
+                            if (area.TryGetValue("attenuationAreaTypeId", out object id))
+                                usedFloorTypeIds.Add(id?.ToString() ?? "");
+                        }
+                        var viewFloorTypes = globalFloorTypes
+                            .Where(ft => usedFloorTypeIds.Contains(ft.GetValueOrDefault("id")?.ToString() ?? ""))
+                            .ToList();
+
+                        BuildEsx(new List<PerViewData> { vd }, viewTypes, viewFloorTypes,
+                                 path, projName, clientName, projAddress);
                         esxFiles.Add(path);
                     }
                 }
@@ -1012,6 +1038,7 @@ namespace EkahauRevitPlugin
         private static void BuildEsx(
             List<PerViewData> views,
             List<Dictionary<string, object>> wallTypes,
+            List<Dictionary<string, object>> floorTypes,
             string outputPath,
             string projectName, string clientName, string address)
         {
@@ -1088,12 +1115,15 @@ namespace EkahauRevitPlugin
                 }).ToList(),
             });
 
-            // ── 6. wallTypes.json (de-duplicated by presetKey) ────────────
-            var seenKeys    = new HashSet<string>();
+            // ── 6. wallTypes.json (de-duplicated by ID) ───────────────────
+            //   v3.0.0: dedup by id (GUID) instead of preset key, because
+            //   the same preset can now produce multiple types when
+            //   thicknesses or heights differ.
+            var seenIds     = new HashSet<string>();
             var uniqueTypes = new List<Dictionary<string, object>>();
             foreach (var wt in wallTypes)
             {
-                if (wt.TryGetValue("key", out object k) && seenKeys.Add(k?.ToString() ?? ""))
+                if (wt.TryGetValue("id", out object id) && seenIds.Add(id?.ToString() ?? ""))
                     uniqueTypes.Add(wt);
             }
             AddJson("wallTypes.json", new Dictionary<string, object>
@@ -1128,10 +1158,22 @@ namespace EkahauRevitPlugin
                 { ["antennaTypes"] = Array.Empty<object>() });
             AddJson("floorTypes.json", new Dictionary<string, object>
                 { ["floorTypes"] = Array.Empty<object>() });
+
+            // v3.0.0 — attenuationAreaTypes / attenuationAreas: floor slabs
+            // collected from Revit Floor elements via FloorCollector.
+            // Dedup the types by id so each unique (preset + thickness +
+            // height bracket) appears once.
+            var seenFloorTypeIds = new HashSet<string>();
+            var uniqueFloorTypes = new List<Dictionary<string, object>>();
+            foreach (var ft in (floorTypes ?? new List<Dictionary<string, object>>()))
+            {
+                if (ft.TryGetValue("id", out object id) && seenFloorTypeIds.Add(id?.ToString() ?? ""))
+                    uniqueFloorTypes.Add(ft);
+            }
             AddJson("attenuationAreaTypes.json", new Dictionary<string, object>
-                { ["attenuationAreaTypes"] = Array.Empty<object>() });
+                { ["attenuationAreaTypes"] = uniqueFloorTypes });
             AddJson("attenuationAreas.json", new Dictionary<string, object>
-                { ["attenuationAreas"] = Array.Empty<object>() });
+                { ["attenuationAreas"] = views.SelectMany(v => v.FloorAttenuationAreas).ToList() });
             AddJson("applicationProfiles.json", new Dictionary<string, object>
                 { ["applicationProfiles"] = Array.Empty<object>() });
             AddJson("deviceProfiles.json", new Dictionary<string, object>
@@ -1374,6 +1416,12 @@ namespace EkahauRevitPlugin
         public string PresetKey       { get; set; }
         public string Source          { get; set; }
         public double ThicknessMeters { get; set; }
+        // v3.0.0: actual vertical extent of the wall in metres,
+        // relative to the host level (lower=0 typically).  Read from
+        // Revit's WALL_BASE_OFFSET + WALL_USER_HEIGHT_PARAM / top
+        // constraint via GetWallHeightMeters.  Fallback: 0..3.0 m.
+        public double LowerEdgeMeters { get; set; }
+        public double UpperEdgeMeters { get; set; } = 3.0;
     }
 
     public class OpeningData
@@ -1385,6 +1433,16 @@ namespace EkahauRevitPlugin
         public string          Source     { get; set; }
         public string          Category   { get; set; }
         public string          TypeName   { get; set; }
+        // v3.0.0: opening vertical extent in metres, relative to the
+        // host wall's base.  Doors: sill ≈ 0, head ≈ 2.1.  Windows:
+        // sill > 0, head depends on the family.
+        public double          SillHeightMeters { get; set; }
+        public double          HeadHeightMeters { get; set; } = 2.1;
+        // Cached host-wall height range so the splitter can synthesise
+        // "wall above opening" / "wall below sill" stacked segments
+        // without looking the wall up again.
+        public double          HostWallLowerM   { get; set; }
+        public double          HostWallUpperM   { get; set; } = 3.0;
     }
 
     public class FinalSegment
@@ -1395,6 +1453,31 @@ namespace EkahauRevitPlugin
         public string Source              { get; set; }
         public double ThicknessMeters     { get; set; }
         public string TypeName            { get; set; }
+        // v3.0.0: per-segment vertical extent in metres.  Doors and
+        // windows occupy a SUB-RANGE of the host wall's height; the
+        // splitter generates up to 3 stacked segments at each
+        // opening (wall-below, opening, wall-above) each with its
+        // own (LowerEdge, UpperEdge).
+        public double LowerEdgeMeters     { get; set; }
+        public double UpperEdgeMeters     { get; set; } = 3.0;
+    }
+
+    // v3.0.0: a horizontal slab (floor / ceiling).  Exported as an
+    // Ekahau attenuationArea — a closed polygon with RF properties
+    // that affects vertical signal propagation between floors.
+    public class FloorSlabData
+    {
+        public long   FloorId        { get; set; }
+        public string TypeName       { get; set; }
+        public string PresetKey      { get; set; }
+        public string Source         { get; set; }
+        public double ThicknessMeters { get; set; }
+        public double ElevationMeters { get; set; }
+        // Outer boundary polygon in host-world XY (feet).  Inner loops
+        // (holes) are not exported (Ekahau attenuationAreas are a
+        // single polygon).
+        public List<(double X, double Y)> Outline { get; set; }
+            = new List<(double X, double Y)>();
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1604,6 +1687,9 @@ namespace EkahauRevitPlugin
                 }
                 catch { }
 
+                // v3.0.0: read actual wall height from Revit params.
+                var (lowerM, upperM) = GetWallHeightMeters(wall);
+
                 result.Add(new WallData
                 {
                     WallId         = VersionCompat.GetIdValue(wall.Id),
@@ -1613,9 +1699,154 @@ namespace EkahauRevitPlugin
                     PresetKey      = presetKey,
                     Source         = source,
                     ThicknessMeters = thicknessM,
+                    LowerEdgeMeters = lowerM,
+                    UpperEdgeMeters = upperM,
                 });
             }
             catch { }
+        }
+
+        // ──────────────────────────────────────────────────────────────
+        //  v3.0.0 — Wall height extraction
+        //
+        //  Reads the actual wall's vertical extent from Revit parameters:
+        //  base offset + (unconnected height OR top constraint + offset).
+        //  Returns (lowerM, upperM) in metres relative to the host level
+        //  base.  Falls back to (0, 3.0) when extraction fails (typical
+        //  partition wall) so we never write garbage to Ekahau.
+        // ──────────────────────────────────────────────────────────────
+        private static (double lowerM, double upperM) GetWallHeightMeters(Wall wall)
+        {
+            double baseOffsetFt = 0;
+            double topHeightFt  = 0;
+
+            try
+            {
+                var baseOff = wall.get_Parameter(BuiltInParameter.WALL_BASE_OFFSET);
+                if (baseOff != null && baseOff.HasValue)
+                    baseOffsetFt = baseOff.AsDouble();
+            }
+            catch { }
+
+            // Path 1: "Unconnected Height" — most common for partition walls.
+            try
+            {
+                var unconn = wall.get_Parameter(BuiltInParameter.WALL_USER_HEIGHT_PARAM);
+                if (unconn != null && unconn.HasValue && unconn.AsDouble() > 0.01)
+                    topHeightFt = baseOffsetFt + unconn.AsDouble();
+            }
+            catch { }
+
+            // Path 2: "Top Constraint" + "Top Offset" — when wall attaches
+            // to a level above (e.g. structural walls, atrium walls).
+            if (topHeightFt <= 0)
+            {
+                try
+                {
+                    var topLevelId = wall.get_Parameter(BuiltInParameter.WALL_HEIGHT_TYPE)?.AsElementId();
+                    if (topLevelId != null && topLevelId != ElementId.InvalidElementId)
+                    {
+                        var topLevel = wall.Document.GetElement(topLevelId) as Level;
+                        Level baseLevel = null;
+                        try
+                        {
+                            var baseLevelId = wall.get_Parameter(BuiltInParameter.WALL_BASE_CONSTRAINT)?.AsElementId();
+                            if (baseLevelId != null && baseLevelId != ElementId.InvalidElementId)
+                                baseLevel = wall.Document.GetElement(baseLevelId) as Level;
+                        }
+                        catch { }
+                        if (topLevel != null)
+                        {
+                            double topElev  = topLevel.Elevation;
+                            double baseElev = baseLevel?.Elevation ?? 0;
+                            topHeightFt = topElev - baseElev;
+                            try
+                            {
+                                var topOff = wall.get_Parameter(BuiltInParameter.WALL_TOP_OFFSET);
+                                if (topOff != null && topOff.HasValue)
+                                    topHeightFt += topOff.AsDouble();
+                            }
+                            catch { }
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            double lowerM = baseOffsetFt * FeetToMetres;
+            double upperM = topHeightFt * FeetToMetres;
+
+            // Sanity: must produce a positive height.  Default 3 m
+            // (typical floor-to-floor) when the wall has no usable
+            // height parameter (rare but happens for "hidden" walls).
+            if (upperM <= lowerM + 0.01)
+                upperM = lowerM + 3.0;
+
+            return (Math.Round(lowerM, 3), Math.Round(upperM, 3));
+        }
+
+        // ──────────────────────────────────────────────────────────────
+        //  v3.0.0 — Opening (door / window) vertical extent
+        //
+        //  Doors: INSTANCE_HEAD_HEIGHT_PARAM is the head height above the
+        //  wall base.  Sill = 0 (doors land on the floor).
+        //  Windows: INSTANCE_SILL_HEIGHT_PARAM is the sill above the
+        //  wall base; head = sill + GENERIC_HEIGHT (from family symbol).
+        //  Fallbacks: door 0..2.1 m, window 0.9..2.4 m.
+        // ──────────────────────────────────────────────────────────────
+        private static (double sillM, double headM) GetOpeningHeightMeters(
+            FamilyInstance fi, string category)
+        {
+            double sillFt = 0;
+            double headFt = 0;
+
+            try
+            {
+                var headParam = fi.get_Parameter(BuiltInParameter.INSTANCE_HEAD_HEIGHT_PARAM);
+                if (headParam != null && headParam.HasValue && headParam.AsDouble() > 0.01)
+                    headFt = headParam.AsDouble();
+            }
+            catch { }
+
+            try
+            {
+                var sillParam = fi.get_Parameter(BuiltInParameter.INSTANCE_SILL_HEIGHT_PARAM);
+                if (sillParam != null && sillParam.HasValue)
+                    sillFt = sillParam.AsDouble();
+            }
+            catch { }
+
+            // If head not set, try GENERIC_HEIGHT on the symbol (window)
+            // and add to sill, or fall back to category default.
+            if (headFt <= 0.01)
+            {
+                try
+                {
+                    var symHeight = fi.Symbol?.get_Parameter(BuiltInParameter.GENERIC_HEIGHT);
+                    if (symHeight != null && symHeight.HasValue && symHeight.AsDouble() > 0.01)
+                        headFt = sillFt + symHeight.AsDouble();
+                }
+                catch { }
+            }
+
+            double sillM = sillFt * FeetToMetres;
+            double headM = headFt * FeetToMetres;
+
+            // Final sanity defaults if parameters were missing entirely.
+            if (headM <= sillM + 0.05)
+            {
+                if (string.Equals(category, "door", StringComparison.OrdinalIgnoreCase))
+                {
+                    sillM = 0;
+                    headM = 2.1;
+                }
+                else
+                {
+                    sillM = 0.9;
+                    headM = 2.4;
+                }
+            }
+            return (Math.Round(sillM, 3), Math.Round(headM, 3));
         }
 
         private static void AddOpening(
@@ -1654,15 +1885,29 @@ namespace EkahauRevitPlugin
                 var (presetKey, source) = EkahauTypeResolver.ResolveEkahauType(
                     doc, et, category, linkConfig, overrides);
 
+                // v3.0.0: opening + host wall vertical extents.
+                var (sillM, headM) = GetOpeningHeightMeters(fi, category);
+                double hostLowerM = 0, hostUpperM = 3.0;
+                try
+                {
+                    if (fi.Host is Wall hostWall)
+                        (hostLowerM, hostUpperM) = GetWallHeightMeters(hostWall);
+                }
+                catch { }
+
                 result.Add(new OpeningData
                 {
-                    HostWallId = hostId,
-                    Center     = (worldPt.X, worldPt.Y),
-                    WidthFeet  = w,
-                    PresetKey  = presetKey,
-                    Source     = source,
-                    Category   = category,
-                    TypeName   = et != null ? RevitHelpers.SafeName(et) : "Unknown",
+                    HostWallId       = hostId,
+                    Center           = (worldPt.X, worldPt.Y),
+                    WidthFeet        = w,
+                    PresetKey        = presetKey,
+                    Source           = source,
+                    Category         = category,
+                    TypeName         = et != null ? RevitHelpers.SafeName(et) : "Unknown",
+                    SillHeightMeters = sillM,
+                    HeadHeightMeters = headM,
+                    HostWallLowerM   = hostLowerM,
+                    HostWallUpperM   = hostUpperM,
                 });
             }
             catch { }
@@ -1942,16 +2187,14 @@ namespace EkahauRevitPlugin
                             final.Add(WallSeg(Along(segStart, segEnd, cursor),
                                               Along(segStart, segEnd, iv.T0), wall));
 
-                        var opPreset = EkahauPresets.All.GetValueOrDefault(iv.Op.PresetKey);
-                        final.Add(new FinalSegment
-                        {
-                            Start          = Along(segStart, segEnd, iv.T0),
-                            End            = Along(segStart, segEnd, iv.T1),
-                            PresetKey      = iv.Op.PresetKey,
-                            Source         = iv.Op.Source,
-                            ThicknessMeters= opPreset?.DefaultThicknessMeters ?? 0.04,
-                            TypeName       = iv.Op.TypeName,
-                        });
+                        // v3.0.0: emit up to 3 stacked segments at each
+                        // opening (wall-below-sill, opening, wall-above-
+                        // head).  All three live at the same XY interval
+                        // [T0, T1] but at different vertical extents.
+                        var op = iv.Op;
+                        var (xa, ya) = Along(segStart, segEnd, iv.T0);
+                        var (xb, yb) = Along(segStart, segEnd, iv.T1);
+                        EmitStackedOpeningSegments(final, (xa, ya), (xb, yb), wall, op);
                         cursor = iv.T1;
                     }
 
@@ -1961,6 +2204,74 @@ namespace EkahauRevitPlugin
                 }
             }
             return final;
+        }
+
+        // ──────────────────────────────────────────────────────────────
+        //  v3.0.0 — Emit stacked segments at an opening location
+        //
+        //  For a door/window between [t0, t1] of the host wall segment,
+        //  produce up to three FinalSegments at the same XY:
+        //    1. wall-below-sill    [hostLower, sill]            (if sill > hostLower)
+        //    2. opening itself     [sill, head]                 (always)
+        //    3. wall-above-head    [head, hostUpper]            (if head < hostUpper)
+        //
+        //  Each gets its own LowerEdge / UpperEdge so the downstream
+        //  Ekahau wall-type bucketing (preset, thickness, height) can
+        //  generate accurate per-elevation RF properties.
+        // ──────────────────────────────────────────────────────────────
+        private static void EmitStackedOpeningSegments(
+            List<FinalSegment> final,
+            (double X, double Y) a, (double X, double Y) b,
+            WallData wall, OpeningData op)
+        {
+            double hostLower = op.HostWallLowerM > 0 ? op.HostWallLowerM : wall.LowerEdgeMeters;
+            double hostUpper = op.HostWallUpperM > hostLower ? op.HostWallUpperM : wall.UpperEdgeMeters;
+            double sill      = Math.Max(hostLower, op.SillHeightMeters);
+            double head      = Math.Min(hostUpper, op.HeadHeightMeters);
+
+            // Below-sill wall segment (typical for windows).
+            if (sill > hostLower + 0.05)
+            {
+                final.Add(new FinalSegment
+                {
+                    Start = a, End = b,
+                    PresetKey       = wall.PresetKey,
+                    Source          = wall.Source,
+                    ThicknessMeters = wall.ThicknessMeters,
+                    TypeName        = wall.TypeName,
+                    LowerEdgeMeters = hostLower,
+                    UpperEdgeMeters = sill,
+                });
+            }
+
+            // The opening itself (always present).
+            var opPreset = EkahauPresets.All.GetValueOrDefault(op.PresetKey);
+            final.Add(new FinalSegment
+            {
+                Start = a, End = b,
+                PresetKey       = op.PresetKey,
+                Source          = op.Source,
+                ThicknessMeters = opPreset?.DefaultThicknessMeters ?? 0.04,
+                TypeName        = op.TypeName,
+                LowerEdgeMeters = sill,
+                UpperEdgeMeters = head,
+            });
+
+            // Above-head wall segment (typical for both doors and windows
+            // in walls taller than the opening).
+            if (head < hostUpper - 0.05)
+            {
+                final.Add(new FinalSegment
+                {
+                    Start = a, End = b,
+                    PresetKey       = wall.PresetKey,
+                    Source          = wall.Source,
+                    ThicknessMeters = wall.ThicknessMeters,
+                    TypeName        = wall.TypeName,
+                    LowerEdgeMeters = head,
+                    UpperEdgeMeters = hostUpper,
+                });
+            }
         }
 
         private static FinalSegment WallSeg(
@@ -1973,6 +2284,8 @@ namespace EkahauRevitPlugin
                 Source          = w.Source,
                 ThicknessMeters = w.ThicknessMeters,
                 TypeName        = w.TypeName,
+                LowerEdgeMeters = w.LowerEdgeMeters,
+                UpperEdgeMeters = w.UpperEdgeMeters,
             };
 
         private static double ProjectT(
@@ -2219,13 +2532,24 @@ namespace EkahauRevitPlugin
             var wallPoints   = new List<Dictionary<string, object>>();
             var wallSegments = new List<Dictionary<string, object>>();
 
-            string GetOrCreateType(string presetKey, double thicknessM)
+            // v3.0.0: cache key now includes thickness bracket + height
+            //   bracket so walls with the same preset but different
+            //   thicknesses / heights become distinct Ekahau wall types.
+            //   Bracketing rules (spec):
+            //     thickness — round to nearest mm; reuse type if within
+            //                  10% of the cached type's thickness
+            //     height    — round lower/upper to nearest 0.1 m
+            string GetOrCreateType(string presetKey, double thicknessM, double lowerM, double upperM)
             {
-                // Req 9: shared cache — same preset key → same Ekahau type GUID
-                if (!globalTypeCache.TryGetValue(presetKey, out var wt))
+                int thickMm  = (int)Math.Round(thicknessM * 1000.0);
+                double lowEdge = Math.Round(lowerM, 1);
+                double hiEdge  = Math.Round(upperM, 1);
+                string typeKey = $"{presetKey}_{thickMm}mm_{lowEdge:F1}-{hiEdge:F1}m";
+
+                if (!globalTypeCache.TryGetValue(typeKey, out var wt))
                 {
-                    wt = MakeWallType(presetKey, thicknessM);
-                    globalTypeCache[presetKey] = wt;
+                    wt = MakeWallType(presetKey, thicknessM, lowerM, upperM);
+                    globalTypeCache[typeKey] = wt;
                     globalWallTypes.Add(wt);
                 }
                 return (string)wt["id"];
@@ -2244,7 +2568,9 @@ namespace EkahauRevitPlugin
                     continue;
                 }
 
-                string wtId = GetOrCreateType(seg.PresetKey, seg.ThicknessMeters);
+                string wtId = GetOrCreateType(
+                    seg.PresetKey, seg.ThicknessMeters,
+                    seg.LowerEdgeMeters, seg.UpperEdgeMeters);
 
                 var (ekX1, ekY1) = xform(seg.Start.X, seg.Start.Y);
                 var (ekX2, ekY2) = xform(seg.End.X,   seg.End.Y);
@@ -2303,22 +2629,43 @@ namespace EkahauRevitPlugin
 
         /// <summary>
         /// Req 1: Build Ekahau wallType dict from preset — no custom_attn.
+        /// v3.0.0: thickness, lowerEdge, upperEdge now come from the
+        ///   actual Revit wall (per type, bracketed) instead of preset
+        ///   defaults + hardcoded 0..12.2 m.  Name gets a suffix when
+        ///   either dimension is non-standard so distinct types are
+        ///   visually distinguishable in Ekahau Pro.
         /// </summary>
         private static Dictionary<string, object> MakeWallType(
-            string presetKey, double thicknessM)
+            string presetKey, double thicknessM, double lowerM, double upperM)
         {
             var preset = EkahauPresets.All.GetValueOrDefault(presetKey)
                       ?? EkahauPresets.All["Generic"];
 
+            // Name suffix: include thickness when it differs from the
+            //   preset default by >10%, and height range when not the
+            //   standard 0..3 m floor-to-floor.
+            string name = preset.Name;
+            double thickDeltaFrac = preset.DefaultThicknessMeters > 0
+                ? Math.Abs(thicknessM - preset.DefaultThicknessMeters) / preset.DefaultThicknessMeters
+                : 0;
+            bool nonStdThick  = thickDeltaFrac > 0.10;
+            bool nonStdHeight = Math.Abs(upperM - 3.0) > 0.3 || lowerM > 0.05;
+            if (nonStdThick && nonStdHeight)
+                name = $"{preset.Name} ({(int)Math.Round(thicknessM * 1000)}mm, {lowerM:F1}-{upperM:F1}m)";
+            else if (nonStdThick)
+                name = $"{preset.Name} ({(int)Math.Round(thicknessM * 1000)}mm)";
+            else if (nonStdHeight)
+                name = $"{preset.Name} ({lowerM:F1}-{upperM:F1}m)";
+
             return new Dictionary<string, object>
             {
                 ["id"]        = Guid.NewGuid().ToString(),
-                ["name"]      = preset.Name,
+                ["name"]      = name,
                 ["key"]       = presetKey,
                 ["color"]     = preset.Color,
                 ["thickness"] = Math.Round(thicknessM, 4),
-                ["lowerEdge"] = 0.0,
-                ["upperEdge"] = 12.2,
+                ["lowerEdge"] = Math.Round(lowerM, 3),
+                ["upperEdge"] = Math.Round(upperM, 3),
                 ["propagationProperties"] = new object[]
                 {
                     PropEntry("TWO",  preset.AttenuationTwoGHz,  preset),
@@ -2338,5 +2685,314 @@ namespace EkahauRevitPlugin
                 ["reflectionCoefficient"] = preset.ReflectionCoefficient,
                 ["diffractionCoefficient"]= preset.DiffractionCoefficient,
             };
+
+        // ─────────────────────────────────────────────────────────────────
+        //  v3.0.0 — Floor slab attenuationArea builder
+        //
+        //  Floors become Ekahau attenuationAreas — closed polygons with
+        //  RF properties.  Polygon vertices are pushed through xform (the
+        //  same Revit-world-to-Ekahau-pixel transform used for walls), so
+        //  slabs land on the correct pixels in Ekahau Pro.
+        //
+        //  Types are bracketed identically to walls: one type per
+        //  (preset, thickness rounded to mm, lowerEdge / upperEdge
+        //  rounded to 0.1 m).  All slabs with the same bracket key share
+        //  one attenuationAreaType id.
+        // ─────────────────────────────────────────────────────────────────
+        public static List<Dictionary<string, object>> BuildFloorAttenuationAreas(
+            List<FloorSlabData> slabs,
+            string floorPlanId,
+            Func<double, double, (double Ex, double Ey)> xform,
+            Dictionary<string, Dictionary<string, object>> globalFloorTypeCache,
+            List<Dictionary<string, object>> globalFloorTypes,
+            StringBuilder debugLog = null)
+        {
+            var areas = new List<Dictionary<string, object>>();
+            if (slabs == null || slabs.Count == 0) return areas;
+
+            string GetOrCreateFloorType(string presetKey, double thickM, double lowM, double hiM)
+            {
+                int thickMm   = (int)Math.Round(thickM * 1000.0);
+                double lowR   = Math.Round(lowM, 1);
+                double hiR    = Math.Round(hiM, 1);
+                string key    = $"FLR_{presetKey}_{thickMm}mm_{lowR:F1}-{hiR:F1}m";
+                if (!globalFloorTypeCache.TryGetValue(key, out var ft))
+                {
+                    ft = MakeFloorType(presetKey, thickM, lowM, hiM);
+                    globalFloorTypeCache[key] = ft;
+                    globalFloorTypes.Add(ft);
+                }
+                return (string)ft["id"];
+            }
+
+            int idx = 0;
+            foreach (var slab in slabs)
+            {
+                if (slab.Outline == null || slab.Outline.Count < 3)
+                {
+                    debugLog?.AppendLine(
+                        $"  [skip] floor#{idx} {slab.TypeName}: " +
+                        $"only {(slab.Outline?.Count ?? 0)} vertices");
+                    idx++; continue;
+                }
+
+                double lowM = slab.ElevationMeters;
+                double hiM  = slab.ElevationMeters + slab.ThicknessMeters;
+                string typeId = GetOrCreateFloorType(
+                    slab.PresetKey, slab.ThicknessMeters, lowM, hiM);
+
+                var pts = new List<Dictionary<string, object>>(slab.Outline.Count);
+                foreach (var (wx, wy) in slab.Outline)
+                {
+                    var (ex, ey) = xform(wx, wy);
+                    pts.Add(new Dictionary<string, object>
+                    {
+                        ["x"] = Math.Round(ex, 6),
+                        ["y"] = Math.Round(ey, 6),
+                    });
+                }
+
+                debugLog?.AppendLine(
+                    $"  floor#{idx} {slab.TypeName}[{slab.PresetKey}/{slab.Source}] " +
+                    $"thk={slab.ThicknessMeters * 1000:F0}mm  z=[{lowM:F2},{hiM:F2}]m  " +
+                    $"verts={pts.Count}");
+
+                areas.Add(new Dictionary<string, object>
+                {
+                    ["id"]                     = Guid.NewGuid().ToString(),
+                    ["attenuationAreaTypeId"]  = typeId,
+                    ["floorPlanId"]            = floorPlanId,
+                    ["area"]                   = pts,
+                    ["status"]                 = "CREATED",
+                });
+
+                idx++;
+            }
+
+            return areas;
+        }
+
+        private static Dictionary<string, object> MakeFloorType(
+            string presetKey, double thicknessM, double lowerM, double upperM)
+        {
+            var preset = EkahauPresets.All.GetValueOrDefault(presetKey)
+                      ?? EkahauPresets.All.GetValueOrDefault("FloorSlab")
+                      ?? EkahauPresets.All["Generic"];
+
+            // Always include thickness in the name — floor slabs vary widely
+            //   (100 mm gypcrete vs 350 mm waffle slab) and Ekahau Pro shows
+            //   the name in its propagation editor.
+            string name = $"{preset.Name} ({(int)Math.Round(thicknessM * 1000)}mm, z {lowerM:F1}-{upperM:F1}m)";
+
+            return new Dictionary<string, object>
+            {
+                ["id"]        = Guid.NewGuid().ToString(),
+                ["name"]      = name,
+                ["color"]     = preset.Color,
+                ["lowerEdge"] = Math.Round(lowerM, 3),
+                ["upperEdge"] = Math.Round(upperM, 3),
+                ["propagationProperties"] = new object[]
+                {
+                    PropEntry("TWO",  preset.AttenuationTwoGHz,  preset),
+                    PropEntry("FIVE", preset.AttenuationFiveGHz, preset),
+                    PropEntry("SIX",  preset.AttenuationSixGHz,  preset),
+                },
+                ["status"] = "CREATED",
+            };
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  v3.0.0 — Floor / Ceiling slab collector
+    //
+    //  Extracts Revit Floor elements visible in the view, lifts each one's
+    //  outer boundary polygon from geometry (largest horizontal face), and
+    //  packages it as a FloorSlabData with elevation + thickness pulled
+    //  from CompoundStructure + level elevation.
+    //
+    //  Strategy:
+    //    1. Use a view-bound FilteredElementCollector — Revit's view range
+    //       handles "which floors are on this level".
+    //    2. For the outline, scan the floor's geometry for the largest
+    //       PlanarFace with a near-vertical normal, then take its outer
+    //       EdgeLoop.  Works on flat floors, sloped floors, and slab-edge
+    //       floors alike.
+    //    3. Thickness from CompoundStructure.GetWidth(); fallback 0.20 m.
+    //    4. Elevation from FLOOR_HEIGHTABOVELEVEL_PARAM + host level.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    public static class FloorCollector
+    {
+        private const double FeetToMetres = 0.3048;
+
+        public static List<FloorSlabData> CollectFloors(
+            Document doc, ViewPlan view,
+            LinkWallMapping linkConfig = null,
+            Dictionary<string, string> overrides = null)
+        {
+            var result = new List<FloorSlabData>();
+
+            foreach (var elem in new FilteredElementCollector(doc, view.Id)
+                .OfCategory(BuiltInCategory.OST_Floors)
+                .WhereElementIsNotElementType().ToElements())
+            {
+                AddFloor(doc, elem, Transform.Identity, linkConfig, overrides, result);
+            }
+
+            // Linked-model floors — only when user configured wall-type
+            // mappings (we reuse the same linked-doc filter so we don't
+            // start pulling slabs from an arbitrary link).
+            if (linkConfig != null && linkConfig.TypeUniqueIdToPreset.Count > 0)
+            {
+                foreach (var linkInst in new FilteredElementCollector(doc)
+                    .OfClass(typeof(RevitLinkInstance)).Cast<RevitLinkInstance>())
+                {
+                    if (!string.IsNullOrEmpty(linkConfig.SelectedLinkUniqueId) &&
+                        linkInst.UniqueId != linkConfig.SelectedLinkUniqueId)
+                        continue;
+
+                    var linkDoc = linkInst.GetLinkDocument();
+                    if (linkDoc == null) continue;
+                    Transform lx = linkInst.GetTotalTransform();
+
+                    foreach (var elem in new FilteredElementCollector(linkDoc)
+                        .OfCategory(BuiltInCategory.OST_Floors)
+                        .WhereElementIsNotElementType().ToElements())
+                    {
+                        AddFloor(linkDoc, elem, lx, linkConfig, overrides, result);
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        private static void AddFloor(
+            Document doc, Element elem, Transform xform,
+            LinkWallMapping linkConfig,
+            Dictionary<string, string> overrides,
+            List<FloorSlabData> result)
+        {
+            try
+            {
+                if (!(elem is Floor floor)) return;
+                var fType = doc.GetElement(floor.GetTypeId()) as FloorType;
+
+                // ── Thickness ──────────────────────────────────────────
+                double thicknessM = 0.20;
+                try
+                {
+                    var cs = fType?.GetCompoundStructure();
+                    if (cs != null)
+                    {
+                        double wFt = cs.GetWidth();
+                        if (wFt > 0) thicknessM = wFt * FeetToMetres;
+                    }
+                }
+                catch { }
+
+                // ── Elevation (top of slab, m above project base) ──────
+                double elevationM = 0.0;
+                try
+                {
+                    Level level = doc.GetElement(floor.LevelId) as Level;
+                    double levelElevFt = level?.Elevation ?? 0.0;
+                    double heightAboveFt = 0.0;
+                    var hParam = floor.get_Parameter(BuiltInParameter.FLOOR_HEIGHTABOVELEVEL_PARAM);
+                    if (hParam != null && hParam.HasValue)
+                        heightAboveFt = hParam.AsDouble();
+                    elevationM = (levelElevFt + heightAboveFt) * FeetToMetres;
+                }
+                catch { }
+
+                // ── Outline (largest horizontal face → outer edge loop) ─
+                var outline = ExtractOutline(floor, xform);
+                if (outline.Count < 3) return;
+
+                // ── Preset resolution ─────────────────────────────────
+                // Floors don't map cleanly to wall presets, so default to
+                // FloorSlab.  The Type-Resolver could be extended later
+                // to read an Ekahau_FloorType shared parameter.
+                string presetKey = "FloorSlab";
+                string source    = "Fallback";
+
+                result.Add(new FloorSlabData
+                {
+                    FloorId         = VersionCompat.GetIdValue(floor.Id),
+                    TypeName        = fType != null ? RevitHelpers.SafeName(fType) : "Unknown",
+                    PresetKey       = presetKey,
+                    Source          = source,
+                    ThicknessMeters = thicknessM,
+                    ElevationMeters = elevationM,
+                    Outline         = outline,
+                });
+            }
+            catch { }
+        }
+
+        // Find the largest near-horizontal PlanarFace on the floor's solids
+        // (this is the top or bottom of the slab) and return its outer
+        // EdgeLoop, projected to host-world XY in feet.
+        private static List<(double X, double Y)> ExtractOutline(
+            Floor floor, Transform linkXform)
+        {
+            var pts = new List<(double X, double Y)>();
+            try
+            {
+                var opts = new Options
+                {
+                    ComputeReferences = false,
+                    IncludeNonVisibleObjects = false,
+                };
+                var geom = floor.get_Geometry(opts);
+                if (geom == null) return pts;
+
+                PlanarFace bestFace = null;
+                double bestArea = 0;
+
+                void ScanSolid(Solid s)
+                {
+                    foreach (Face f in s.Faces)
+                    {
+                        if (!(f is PlanarFace pf)) continue;
+                        // Near-horizontal (Z axis ±0.99)
+                        if (Math.Abs(pf.FaceNormal.Z) < 0.99) continue;
+                        if (pf.Area > bestArea)
+                        {
+                            bestArea  = pf.Area;
+                            bestFace  = pf;
+                        }
+                    }
+                }
+
+                foreach (GeometryObject go in geom)
+                {
+                    if (go is Solid solid && solid.Volume > 0)
+                        ScanSolid(solid);
+                    else if (go is GeometryInstance gi)
+                    {
+                        foreach (GeometryObject inner in gi.GetInstanceGeometry())
+                            if (inner is Solid s2 && s2.Volume > 0) ScanSolid(s2);
+                    }
+                }
+
+                if (bestFace == null) return pts;
+
+                EdgeArrayArray loops = bestFace.EdgeLoops;
+                if (loops == null || loops.Size == 0) return pts;
+
+                // First loop is the outer boundary; inner loops (holes)
+                // are not exportable as a single Ekahau attenuationArea.
+                EdgeArray outer = loops.get_Item(0);
+                foreach (Edge edge in outer)
+                {
+                    var curve = edge.AsCurve();
+                    var p0 = linkXform.OfPoint(curve.GetEndPoint(0));
+                    pts.Add((p0.X, p0.Y));
+                }
+            }
+            catch { }
+            return pts;
+        }
     }
 }

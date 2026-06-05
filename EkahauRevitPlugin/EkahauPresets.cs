@@ -101,6 +101,14 @@ namespace EkahauRevitPlugin
                     AttenuationTwoGHz = 8.0, AttenuationFiveGHz = 15.0, AttenuationSixGHz = 18.0,
                     ReflectionCoefficient = 0.35, DiffractionCoefficient = 14.0, DefaultThicknessMeters = 0.15
                 },
+                // v3.0.0 — horizontal slab presets used for Ekahau
+                // attenuationAreas (floor/ceiling RF obstruction).
+                ["FloorSlab"] = new EkahauPreset
+                {
+                    Name = "Floor Slab, Concrete", Color = "#7E7E7E",
+                    AttenuationTwoGHz = 30.0, AttenuationFiveGHz = 50.0, AttenuationSixGHz = 58.0,
+                    ReflectionCoefficient = 0.50, DiffractionCoefficient = 17.0, DefaultThicknessMeters = 0.20
+                },
             };
 
         public static readonly List<string> WallPresets = new List<string>

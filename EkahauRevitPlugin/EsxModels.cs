@@ -116,6 +116,15 @@ namespace EkahauRevitPlugin
         public List<Dictionary<string, object>> WallPoints { get; set; }
             = new List<Dictionary<string, object>>();
 
+        // ── v3.0.0 floor/ceiling attenuation areas ───────────────────────
+        /// <summary>
+        /// One entry per Revit Floor visible in this view, ready to emit
+        /// as an Ekahau attenuationArea.  Points are in Ekahau pixel
+        /// coordinates (already transformed via WorldToEkahau).
+        /// </summary>
+        public List<Dictionary<string, object>> FloorAttenuationAreas { get; set; }
+            = new List<Dictionary<string, object>>();
+
         /// <summary>APs already filtered by user confirmation.</summary>
         public List<ApCandidate> AccessPoints { get; set; }
             = new List<ApCandidate>();
