@@ -1688,7 +1688,15 @@ namespace EkahauRevitPlugin
                 catch { }
 
                 // v3.0.0: read actual wall height from Revit params.
-                var (lowerM, upperM) = GetWallHeightMeters(wall);
+                // AddWall accepts Element (so linked-doc walls flow through);
+                // height reader needs the concrete Wall.  Fallback to the
+                // standard 0..3 m bracket when the element isn't a Wall
+                // (shouldn't happen for OST_Walls, but guards against
+                // in-place mass families).
+                var wallTyped = wall as Wall;
+                var (lowerM, upperM) = wallTyped != null
+                    ? GetWallHeightMeters(wallTyped)
+                    : (0.0, 3.0);
 
                 result.Add(new WallData
                 {
